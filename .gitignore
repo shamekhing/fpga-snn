@@ -15,7 +15,7 @@ __pycache__/
 *.py[cod]
 
 # Local datasets, checkpoints, and generated ROM images.
-/data/
+/data
 !/data/.gitkeep
 src/data/*
 !src/data/.gitkeep
