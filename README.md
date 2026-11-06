@@ -12,59 +12,59 @@ encoded time is independent of the FPGA clock cycles needed to process them.
 
 > **Implementation status:** the Python MNIST trainer, event encoder, integer
 > reference model, and several RTL building blocks exist. The scheduler and
-> top-level datapath are now structurally connected, but the checked-in ROM
-> images are non-constant structural test data rather than exported trained
-> weights and event streams. FPGA accuracy is therefore not claimed yet.
+> top-level datapath are now structurally connected, but local ROM images are
+> non-constant structural test data rather than exported trained weights and
+> event streams. FPGA accuracy is therefore not claimed yet.
 
 ## Contents
 
-This README is in `src/`. The Gowin project file and implementation output
-directory are one level above it.
+This README is at the repository root. Source code is under `src/`; generated
+implementation output is under `impl/`.
 
 | Path | Purpose |
 |---|---|
-| `model/train_snn.py` | Loads MNIST IDX files, prepares differential-time input, trains an snnTorch network, evaluates it, and saves a PyTorch checkpoint. |
-| `model/encode_mnist.py` | Converts an image into signed, differential-time events, keeping one independent event stream per row. |
-| `model/spike_events.py` | Shared Python event representation and overflow-code constants. |
-| `model/snn_ref.py` | Integer, event-driven reference for hidden and output LIF layers. |
-| `model/quantize.py` | Standalone float-to-signed-integer weight quantization helper; not yet integrated with training/export. |
-| `model/export_mem.py` | Standalone `$readmemh`-style hexadecimal writer; model-specific serialization is not yet implemented. |
-| `model/test_snn_model.py` | Tests for event encoding and the integer reference. |
-| `model/test_train_snn.py` | Tests for MNIST IDX loading and training-input preparation. |
-| `model/requirements-model.txt` | Optional CPU-capable Python dependencies for training. |
-| `data/mnist/` | Local MNIST training and test images in IDX format; ignored by Git. |
-| `data/streams/` | Local generated event-stream ROM images; ignored by Git. |
-| `data/weights/` | Local checkpoints and generated weight ROM images; ignored by Git. |
-| `rtl/util/pkg_snn.sv` | Shared network sizes, numeric widths, thresholds, and overflow code. |
-| `rtl/core/time_integrator.sv` | Accumulates differential times into absolute time for one stream. |
-| `rtl/core/event_sched.sv` | Clocked serial minimum-time scan across pending row-stream events. |
-| `rtl/core/lif_neuron.sv` | Signed-event LIF update, optional negative-threshold firing, and reset-to-mod. |
-| `rtl/core/lif_layer.sv` | Time-multiplexed hidden LIF layer sharing one decay/add/threshold datapath. |
-| `rtl/core/lif_layer_parallel.sv` | Parallel LIF layer used for the small output layer. |
-| `rtl/core/spike_counter.sv`, `rtl/util/argmax.sv` | Output spike counts and winner selection. |
-| `rtl/mem/` | Current stream and hidden-weight ROM templates. |
-| `rtl/top/snn_top.sv` | Top-level stream scheduler, hidden/output LIF layers, counters, and argmax integration. |
-| `tb/` | SystemVerilog testbenches for the time integrator, event scheduler, LIF neuron, and top-level integration. |
-| `scripts/run_sim.sh` | Compiles and runs the RTL testbenches with Icarus Verilog. |
-| `scripts/build.tcl` | Gowin build-script template; it does not yet execute a build. |
-| `constraints/tang_primer_20k.cst` | Board constraints; currently only the clock pin is assigned. |
-| `../snn.gprj` | Gowin project file, relative to this README. |
-| `../impl/` | Local Gowin process configuration and generated implementation files. |
-| `../ignore/` | Reserved for local/generated files that should not be committed. |
+| `src/model/train_snn.py` | Loads MNIST IDX files, prepares differential-time input, trains an snnTorch network, evaluates it, and saves a PyTorch checkpoint. |
+| `src/model/encode_mnist.py` | Converts an image into signed, differential-time events, keeping one independent event stream per row. |
+| `src/model/spike_events.py` | Shared Python event representation and overflow-code constants. |
+| `src/model/snn_ref.py` | Integer, event-driven reference for hidden and output LIF layers. |
+| `src/model/quantize.py` | Standalone float-to-signed-integer weight quantization helper; not yet integrated with training/export. |
+| `src/model/export_mem.py` | Standalone `$readmemh`-style hexadecimal writer; model-specific serialization is not yet implemented. |
+| `src/model/test_snn_model.py` | Tests for event encoding and the integer reference. |
+| `src/model/test_train_snn.py` | Tests for MNIST IDX loading and training-input preparation. |
+| `src/model/requirements-model.txt` | Optional CPU-capable Python dependencies for training. |
+| `src/data/mnist/` | Local MNIST training and test images in IDX format; ignored by Git. |
+| `src/data/streams/` | Local generated event-stream ROM images; ignored by Git. |
+| `src/data/weights/` | Local checkpoints and generated weight ROM images; ignored by Git. |
+| `src/rtl/util/pkg_snn.sv` | Shared network sizes, numeric widths, thresholds, and overflow code. |
+| `src/rtl/core/time_integrator.sv` | Accumulates differential times into absolute time for one stream. |
+| `src/rtl/core/event_sched.sv` | Clocked serial minimum-time scan across pending row-stream events. |
+| `src/rtl/core/lif_neuron.sv` | Signed-event LIF update, optional negative-threshold firing, and reset-to-mod. |
+| `src/rtl/core/lif_layer.sv` | Time-multiplexed hidden LIF layer sharing one decay/add/threshold datapath. |
+| `src/rtl/core/lif_layer_parallel.sv` | Parallel LIF layer used for the small output layer. |
+| `src/rtl/core/spike_counter.sv`, `src/rtl/util/argmax.sv` | Output spike counts and winner selection. |
+| `src/rtl/mem/` | Current stream and hidden-weight ROM templates. |
+| `src/rtl/top/snn_top.sv` | Top-level stream scheduler, hidden/output LIF layers, counters, and argmax integration. |
+| `src/tb/` | SystemVerilog testbenches for the time integrator, event scheduler, LIF neuron, and top-level integration. |
+| `src/scripts/run_sim.sh` | Compiles and runs the RTL testbenches with Icarus Verilog. |
+| `src/scripts/build.tcl` | Gowin build-script template; it does not yet execute a build. |
+| `src/constraints/tang_primer_20k.cst` | Board constraints; currently only the clock pin is assigned. |
+| `snn.gprj` | Gowin project file. |
+| `impl/` | Local Gowin process configuration and generated implementation files. |
+| `ignore/` | Reserved for local/generated files that should not be committed. |
 
 ## FPGA project workflow
 
 When adding a new SystemVerilog source file, register it exactly once in the
-`FileList` of `../snn.gprj` with `type="file.verilog"` and `enable="1"`.
+`FileList` of `snn.gprj` with `type="file.verilog"` and `enable="1"`.
 Include the file in the simulation and lint source lists as well, then run the
 RTL regression and naming checks before synthesis.
 
-Update this README after every code, RTL, project-file, constraint, simulation,
-or workflow change so the documented build and verification flow stays current.
-Validated changes remain in the working tree by default. Create or modify a Git
-commit only when explicitly requested.
-
 ## Architecture and data flow
+
+For a detailed theory-to-implementation explanation, see the
+[SNN theory and code guide](docs/Theory&Code/README.md).
+For the complete top-module-to-leaf-module signal flow, see the
+[top-down RTL workflow](docs/Theory&Code/06-top-down-workflow.md).
 
 ### Paper's event representation
 
@@ -84,7 +84,7 @@ time.
 
 ### Current Python trainer
 
-`model/train_snn.py` implements the training path:
+`src/model/train_snn.py` implements the training path:
 
 1. Read the standard uncompressed IDX image and label files.
 2. Normalize pixel values to `[0, 1]`.
@@ -131,7 +131,7 @@ format required by the current ROM templates.
 
 ## MNIST data and training
 
-The trainer expects these files under `data/mnist/`:
+The trainer expects these files under `src/data/mnist/`:
 
 ```text
 train-images.idx3-ubyte
@@ -146,9 +146,9 @@ dimensions, file lengths, label values, and matching image/label counts.
 
 ### Obtain the local data
 
-All datasets, checkpoints, and ROM images under `data/` are intentionally
+All datasets, checkpoints, and ROM images under `src/data/` are intentionally
 ignored by Git. From `src/`, download the standard MNIST IDX files into
-`data/mnist/`:
+`src/data/mnist/`:
 
 ```bash
 mkdir -p data/mnist
@@ -159,16 +159,17 @@ curl -fsSL "$base/t10k-images-idx3-ubyte" -o data/mnist/t10k-images.idx3-ubyte
 curl -fsSL "$base/t10k-labels-idx1-ubyte" -o data/mnist/t10k-labels.idx1-ubyte
 ```
 
-The trainer creates `data/weights/mnist_snn.pt` after training:
+From `src/`, the trainer creates `src/data/weights/mnist_snn.pt` after training:
 
 ```bash
+cd src
 python -m model.train_snn --epochs 10
 ```
 
-`model/export_mem.py` currently provides only the `$readmemh` writer; the
+`src/model/export_mem.py` currently provides only the `$readmemh` writer; the
 checkpoint-to-ROM export is not implemented yet. Therefore
-`data/streams/stream.mem`, `data/weights/hidden_w.mem`, and
-`data/weights/output_w.mem` must be supplied by a compatible export script or
+`src/data/streams/stream.mem`, `src/data/weights/hidden_w.mem`, and
+`src/data/weights/output_w.mem` must be supplied by a compatible export script or
 copied from a known-good local artifact before running the FPGA ROM simulation.
 
 ### Install optional training dependencies
@@ -176,6 +177,7 @@ copied from a known-good local artifact before running the FPGA ROM simulation.
 From `src/`, create a virtual environment and install the model requirements:
 
 ```bash
+cd src
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r model/requirements-model.txt
@@ -188,9 +190,10 @@ device.
 
 ### Train
 
-Run from `src/`:
+Run from the repository root:
 
 ```bash
+cd src
 python -m model.train_snn --epochs 10
 ```
 
@@ -226,10 +229,11 @@ python -m model.train_snn \
 
 ### Existing checkpoint
 
-The workspace contains `data/weights/mnist_snn.pt`, trained with
-128 hidden neurons, 10 epochs, seed 0, and the full supplied MNIST splits. The
-recorded final test accuracy is **92.65%** (10,000 images); reloading the saved
-checkpoint and evaluating it reproduced **92.65%**.
+If you have generated `src/data/weights/mnist_snn.pt`, it contains a checkpoint
+trained with 128 hidden neurons, 10 epochs, seed 0, and the full supplied MNIST
+splits. A previous local run recorded **92.65%** test accuracy (10,000 images);
+that result describes the Python model only and is not guaranteed for every
+training environment.
 
 This checkpoint stores floating-point snnTorch model parameters and metadata.
 It is not a Gowin memory image. The current quantizer, integer reference,
@@ -241,7 +245,7 @@ the Python snnTorch model only.
 
 ### Event encoder
 
-`model/encode_mnist.py` provides `delta_encode(image, threshold=0.05)`. It
+`src/model/encode_mnist.py` provides `delta_encode(image, threshold=0.05)`. It
 returns a list of event lists, one per image row. Each regular
 `SpikeEvent(input_index, delta_time, polarity)` identifies a flattened pixel
 index, the time since the preceding event in that row, and polarity `+1` or
@@ -252,7 +256,7 @@ tensor.
 
 ### Integer reference
 
-`model/snn_ref.py` is an integer event reference, not the PyTorch trainer.
+`src/model/snn_ref.py` is an integer event reference, not the PyTorch trainer.
 `lif_step` uses a power-of-two decay (`BETA_SHIFT = 1`, or beta 0.5), adds a
 signed synaptic input, and performs reset-to-mod at the positive threshold.
 An optional lower threshold enables negative spikes. `run_image` accepts
@@ -267,12 +271,12 @@ reset behavior still need to be reconciled and validated.
 
 ### Quantization and memory export
 
-`model/quantize.py` currently provides a simple signed-integer quantizer
+`src/model/quantize.py` currently provides a simple signed-integer quantizer
 (default width 4 bits, range `-8` through `+7`) and returns a scale. It does
 not load the `.pt` checkpoint, preserve separate layer scales, or evaluate
 accuracy after quantization.
 
-`model/export_mem.py` currently provides `write_hex(path, values, width_bits)`.
+`src/model/export_mem.py` currently provides `write_hex(path, values, width_bits)`.
 It writes one masked, zero-padded hexadecimal value per line. It does not yet
 define the stream-bank, packed-weight, output-weight, or checkpoint-to-ROM
 formats.
@@ -280,21 +284,20 @@ formats.
 ## Simulation and tests
 
 Install Icarus Verilog with SystemVerilog support (`iverilog -g2012`) and run
-the RTL regression from `src/`:
+the RTL regression from the repository root:
 
 ```bash
-bash scripts/run_sim.sh
+bash src/scripts/run_sim.sh
 ```
 
 The script runs the focused time-integrator and event-scheduler benches, then
 the LIF-neuron and top-level benches. Icarus-generated `.vvp` outputs are
-written under `impl/`; VCD traces are written in the current simulation
-directory.
+written under `ignore/`; VCD traces are written under `ignore/`.
 
-Run the Python tests with NumPy installed:
+Run the Python tests with NumPy installed from the repository root:
 
 ```bash
-python -m unittest discover -s model -v
+python -m unittest discover -s src/model -v
 ```
 
 The tests cover IDX parsing, supplied dataset dimensions, signed row-event
@@ -304,20 +307,21 @@ smoke test: it does not compare an inference result against a Python golden
 trace.
 
 **Simulation caveat:** `stream_rom.sv` and `weight_rom.sv` call `$readmemh` for
-`data/streams/stream.mem` and `data/weights/hidden_w.mem`. Those files are not
+`src/data/streams/stream.mem` and `src/data/weights/hidden_w.mem`. Those files are not
 provided by the training workflow, so simulations that elaborate these ROMs
 currently print missing-file errors. The testbench may still exit with status
 zero; that does not make the top-level an inference pass.
 
 ### Lint
 
-With Verilator installed, lint/elaborate the current full design from `src/`:
+With Verilator installed, lint/elaborate the current full design from the
+repository root:
 
 ```bash
 verilator --lint-only --timing -Wall -Wno-fatal \
   --top-module snn_top \
-  rtl/util/pkg_snn.sv rtl/core/*.sv rtl/mem/*.sv \
-  rtl/util/argmax.sv rtl/top/*.sv
+  src/rtl/util/pkg_snn.sv src/rtl/core/*.sv src/rtl/mem/*.sv \
+  src/rtl/util/argmax.sv src/rtl/top/*.sv
 ```
 
 `-Wno-fatal` allows the tool to return success while reporting warnings. A
@@ -327,8 +331,8 @@ exit status.
 ## Gowin project and board
 
 The target is the GW2A-LV18PG256C8/I7 device on the Tang Primer 20K. The
-Gowin project file is `../snn.gprj`, and process settings are in
-`../impl/snn_process_config.json` relative to `src/`. The current process
+Gowin project file is `snn.gprj`, and process settings are in
+`impl/snn_process_config.json`. The current process
 configuration selects `snn_top` and SystemVerilog 2017.
 
 The project file lists the RTL and the pin constraints, but this alone does
@@ -338,20 +342,21 @@ not make the design buildable or operational:
   currently bounded at 1024 cycles while end-of-stream handling is finalized.
 - Hidden-neuron processing is time-multiplexed, reducing arithmetic replication
   at the cost of up to `N_HIDDEN` processing cycles per input event.
-- The checked-in `data/streams/stream.mem`, `data/weights/hidden_w.mem`, and
-  `data/weights/output_w.mem` files are non-constant structural test images.
-  They prove ROM inference and resource mapping, not trained-model accuracy.
-- `scripts/build.tcl` only declares the target and file paths; it has a TODO
+- Local `src/data/streams/stream.mem`, `src/data/weights/hidden_w.mem`, and
+  `src/data/weights/output_w.mem` files are non-constant structural test
+  images when present. They prove ROM inference and resource mapping, not
+  trained-model accuracy, and are ignored by Git.
+- `src/scripts/build.tcl` only declares the target and file paths; it has a TODO
   instead of Gowin project/build commands.
-- `constraints/tang_primer_20k.cst` currently constrains only `clk` to H11.
+- `src/constraints/tang_primer_20k.cst` currently constrains only `clk` to H11.
   Confirm the pin and I/O standard against the board documentation; other
   top-level ports are not assigned.
 - The stream and trained-weight ROM formats are not connected to the Python
   checkpoint/export workflow.
-- Generated files in `../impl/` may be stale relative to the current source. The
+- Generated files in `impl/` may be stale relative to the current source. The
 Gowin synthesis, place-and-route, and temporary parser directories under
-`../impl/` are ignored by Git; keep additional local/generated files under
-`../ignore/`.
+`impl/` are ignored by Git; keep additional local/generated files under
+`ignore/`.
 
 No current synthesis, place-and-route, timing, resource, bitstream, or
 on-board inference result is claimed by this README. Before relying on any
