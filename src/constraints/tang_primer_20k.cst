@@ -1,0 +1,10 @@
+// tang_primer_20k.cst
+// Pin and clock constraints for Sipeed Tang Primer 20K + Dock (GW2A-LV18PG256C8/I7).
+// TODO: fill in clock pin and LED/button pins from the Dock schematic.
+// Example syntax (verify pin names against the board docs):
+// IO_LOC "clk" 4;
+// IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// Minimal CPU board pins: 27 MHz clock, reset/run buttons, status LEDs.
+IO_LOC  "clk" H11;
+IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
