@@ -25,6 +25,8 @@ module snn_top (
 
   logic scan_busy;
   logic scan_done;
+  logic hidden_busy;
+  logic hidden_event_done;
   logic ev_valid;
   logic [TIME_W-1:0] ev_time;
   logic [N_INPUT_STREAMS-1:0] ev_mask;
@@ -111,8 +113,8 @@ module snn_top (
   ) u_input_scheduler (
     .clk         (clk),
     .rst_n       (rst_n),
-    .scan_req    (running && !scan_busy && !ev_valid),
-    .ev_ready    (1'b1),
+    .scan_req    (running && !scan_busy && !hidden_busy && !ev_valid),
+    .ev_ready    (hidden_event_done),
     .next_t      (next_time),
     .valid       (stream_valid),
     .negative    (stream_negative),
@@ -134,12 +136,14 @@ module snn_top (
     .dt            (ev_time[DT_W-1:0]),
     .ev_negative   (|ev_negative),
     .w_row         (hidden_w_row),
+    .busy          (hidden_busy),
+    .event_done    (hidden_event_done),
     .spk_valid     (hidden_spike),
     .spk_negative  (hidden_negative),
     .pot           (hidden_pot)
   );
 
-  lif_layer #(
+  lif_layer_parallel #(
     .N (N_OUTPUT)
   ) u_output_layer (
     .clk           (clk),
@@ -189,7 +193,7 @@ module snn_top (
         done    <= 1'b1;
       end else begin
         run_count <= run_count + 1'b1;
-        if (ev_valid)
+        if (hidden_event_done)
           stream_addr <= stream_addr + 1'b1;
       end
     end

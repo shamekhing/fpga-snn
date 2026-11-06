@@ -7,6 +7,7 @@
     <FileList>
         <File path="src/rtl/core/event_sched.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/lif_layer.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/core/lif_layer_parallel.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/lif_neuron.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/spike_counter.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/time_integrator.sv" type="file.verilog" enable="1"/>

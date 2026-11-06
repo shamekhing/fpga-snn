@@ -39,7 +39,8 @@ directory are one level above it.
 | `rtl/core/time_integrator.sv` | Accumulates differential times into absolute time for one stream. |
 | `rtl/core/event_sched.sv` | Clocked serial minimum-time scan across pending row-stream events. |
 | `rtl/core/lif_neuron.sv` | Signed-event LIF update, optional negative-threshold firing, and reset-to-mod. |
-| `rtl/core/lif_layer.sv` | Parallel collection of LIF neurons sharing an event and its polarity. |
+| `rtl/core/lif_layer.sv` | Time-multiplexed hidden LIF layer sharing one decay/add/threshold datapath. |
+| `rtl/core/lif_layer_parallel.sv` | Parallel LIF layer used for the small output layer. |
 | `rtl/core/spike_counter.sv`, `rtl/util/argmax.sv` | Output spike counts and winner selection. |
 | `rtl/mem/` | Current stream and hidden-weight ROM templates. |
 | `rtl/top/snn_top.sv` | Top-level stream scheduler, hidden/output LIF layers, counters, and argmax integration. |
@@ -108,7 +109,8 @@ format required by the current ROM templates.
   synaptic input, and subtracts the positive threshold on firing. Negative
   threshold firing can be enabled by a parameter; it is disabled by default.
 - **LIF layer:** sign-adjusts each neuron's weight according to the incoming
-  event polarity and instantiates one neuron per lane.
+  event polarity. The hidden layer updates one neuron per clock using shared
+  arithmetic; the output layer remains parallel because it has only ten lanes.
 - **Spike counter and argmax:** count output spikes and choose the largest
   count, with ties resolved to the lowest index.
 - **Top level:** transitions from idle to run to finish and connects the
@@ -322,6 +324,8 @@ not make the design buildable or operational:
 
 - The top-level datapath is structurally integrated, but its control window is
   currently bounded at 1024 cycles while end-of-stream handling is finalized.
+- Hidden-neuron processing is time-multiplexed, reducing arithmetic replication
+  at the cost of up to `N_HIDDEN` processing cycles per input event.
 - The checked-in `data/streams/stream.mem`, `data/weights/hidden_w.mem`, and
   `data/weights/output_w.mem` files are non-constant structural test images.
   They prove ROM inference and resource mapping, not trained-model accuracy.
