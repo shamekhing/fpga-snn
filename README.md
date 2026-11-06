@@ -52,6 +52,18 @@ directory are one level above it.
 | `../impl/` | Local Gowin process configuration and generated implementation files. |
 | `../ignore/` | Reserved for local/generated files that should not be committed. |
 
+## FPGA project workflow
+
+When adding a new SystemVerilog source file, register it exactly once in the
+`FileList` of `../snn.gprj` with `type="file.verilog"` and `enable="1"`.
+Include the file in the simulation and lint source lists as well, then run the
+RTL regression and naming checks before synthesis.
+
+Update this README after every code, RTL, project-file, constraint, simulation,
+or workflow change so the documented build and verification flow stays current.
+Validated changes remain in the working tree by default. Create or modify a Git
+commit only when explicitly requested.
+
 ## Architecture and data flow
 
 ### Paper's event representation
