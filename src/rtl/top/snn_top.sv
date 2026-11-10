@@ -139,7 +139,20 @@ module snn_top (
   logic signed [POT_W-1:0] output_pot [N_OUTPUT];
   logic output_event_done;
 
-  logic [15:0] output_count [N_OUTPUT];
+  logic [16*N_OUTPUT-1:0] output_count_flat;
+
+  spike_counter u_counter (
+    .clk   (clk),
+    .rst_n (rst_n),
+    .clear (clear_state),
+    .spk_in(output_spk_valid),
+    .count (output_count_flat)
+  );
+
+  argmax u_argmax (
+    .count (output_count_flat),
+    .digit (digit)
+  );
 
   lif_layer #(
     .N (N_HIDDEN),
@@ -171,19 +184,6 @@ module snn_top (
     .spk_negative (output_spk_negative),
     .pot          (output_pot),
     .event_done   (output_event_done)
-  );
-
-  spike_counter u_counter (
-    .clk   (clk),
-    .rst_n (rst_n),
-    .clear (clear_state),
-    .spk_in(output_spk_valid),
-    .count (output_count)
-  );
-
-  argmax u_argmax (
-    .count (output_count),
-    .digit (digit)
   );
 
   // ============================ control ============================
@@ -342,7 +342,6 @@ module snn_top (
       for (int n = 0; n < N_HIDDEN; n++) acc[n] <= '0;
       for (int k = 0; k < N_OUTPUT; k++) acc_out[k] <= '0;
     end else begin
-      state        <= state_n;
       clear_state  <= 1'b0;
       scan_req     <= 1'b0;
       ev_ready     <= 1'b0;
@@ -588,6 +587,11 @@ module snn_top (
 
         default: state_n = S_IDLE;
       endcase
+
+      // Registered after the case so the NBA samples the freshly computed
+      // next state (a transfer placed before the case would latch the
+      // previous cycle's state_n and stall the FSM).
+      state <= state_n;
     end
   end
 

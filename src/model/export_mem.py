@@ -1,11 +1,21 @@
-"""
-export_mem.py
-Writes $readmemh-compatible files for weights, streams and labels.
+"""Export $readmemh-compatible ROM images and golden files for the SNN.
 
-All file formats match the wire format defined in rtl/util/pkg_snn.sv:
-  event_word_t : {neg[0], column[4:0], dt[7:0]} (14 bits, stored in 16-bit word)
-  count word   : 10-bit unsigned per-row event count
-  weight word  : 4 bits per neuron, two's complement, packed little-endian
+Wire formats (must stay in sync with rtl/util/pkg_snn.sv):
+
+* Event word, 14 bits stored in a 16-bit word:
+      ``word = (neg << 13) | (column << 8) | dt``
+  Overflow entries carry ``dt = 0xFF`` with ``column = 0`` and ``neg = 0``
+  (word ``0x00FF``); they advance the row time only.
+* Count word: one per row before its event words, count in bits [9:0].
+* Base-address table: one 16-bit entry per row giving the stream-ROM address
+  of that row's count word.
+* Weights: 4-bit two's complement per neuron, neuron 0 in bits [3:0], neuron
+  n in bits [4n+3:4n]. Hidden ROM: 784 words x 128 neurons (512-bit words).
+  Output ROM: 128 words x 10 neurons (40-bit words).
+
+Quantization: one scale per layer, ``scale = max|W| / 8``, round to nearest
+(``numpy.rint``, half-to-even), clip to [-8, 7]. Biases are dropped: neither
+the reference nor the RTL implements them.
 """
 
 from __future__ import annotations
@@ -19,47 +29,43 @@ import numpy as np
 
 if __package__:
     from .encode_mnist import delta_encode
-    from .spike_events import OVERFLOW_CODE
     from .snn_ref import run_image
+    from .spike_events import OVERFLOW_CODE, SpikeEvent
 else:
     from encode_mnist import delta_encode
-    from spike_events import OVERFLOW_CODE
     from snn_ref import run_image
+    from spike_events import OVERFLOW_CODE, SpikeEvent
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MNIST_DIR = REPO_ROOT / "data" / "mnist"
-EVENT_DIR = REPO_ROOT / "data" / "streams"
 WEIGHT_DIR = REPO_ROOT / "data" / "weights"
+GOLDEN_DIR = REPO_ROOT / "data" / "golden"
 
 IMAGE_ROWS = 28
 IMAGE_COLS = 28
 N_INPUT = IMAGE_ROWS * IMAGE_COLS  # 784
 N_HIDDEN = 128
 N_OUTPUT = 10
-W_W = 4  # 4 bits per weight
+W_W = 4
+COUNT_W = 10
 
-HEADERS = {
-    "event": (
-        "// Event ROM (one per test image)\n"
-        "// Format: one 16-bit word per event: {neg[0], column[4:0], dt[7:0]}\n"
-        "// Each row begins with a 10-bit count word.\n"
-        "// Overflow: dt == 0xFF with column and neg as 0.\n"
-    ),
-    "weight_h": "// Hidden-layer weights (784 input pixels x 128 hidden neurons).\n// One 512-bit word per input pixel (128 neurons x 4 bits).\n",
-    "weight_o": "// Output-layer weights (128 hidden neurons x 10 output neurons).\n// One 40-bit word per hidden neuron (10 neurons x 4 bits).\n",
-    "labels": "// Label per exported image.\n",
-}
+SCALE_FACTOR = 8.0  # scale = max|W| / 8 so the range fills [-8, 7]
+
+HIDDEN_WEIGHT_MEM = WEIGHT_DIR / "hidden_w.mem"
+OUTPUT_WEIGHT_MEM = WEIGHT_DIR / "output_w.mem"
 
 
 def write_hex(path: Path, values, width_bits: int) -> None:
-    """Write one value per line as zero-padded hex."""
+    """Write one value per line as zero-padded hex (width_bits multiple of 4)."""
     if width_bits % 4:
         raise ValueError("width_bits must be a multiple of 4")
     digits = width_bits // 4
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if str(path.parent):
+        os.makedirs(path.parent, exist_ok=True)
+    mask = (1 << width_bits) - 1
     with open(path, "w") as f:
         for v in values:
-            f.write(f"{int(v) & ((1 << width_bits) - 1):0{digits}x}\n")
+            f.write(f"{int(v) & mask:0{digits}x}\n")
 
 
 def read_idx_images(path: Path) -> np.ndarray:
@@ -80,168 +86,219 @@ def read_idx_labels(path: Path) -> np.ndarray:
         raise ValueError(f"{path}: expected IDX magic 2049, got {magic}")
     if len(data) != 8 + count:
         raise ValueError(f"{path}: expected {8 + count} bytes, got {len(data)}")
+    return np.frombuffer(data, dtype=np.uint8, offset=8)
 
-def sweep_theta(train_limit: int = 5000, test_limit: int = None):
-    """Sweep THETA on the training subset and report test accuracy."""
-    from .train_snn import read_idx_images, read_idx_labels
-    from .snn_ref import THETA
 
-    print("Loading MNIST...")
-    train_images = read_idx_images(MNIST_DIR / "train-images.idx3-ubyte")
-    train_labels = read_idx_labels(MNIST_DIR / "train-labels.idx1-ubyte")
+# ---------------------------------------------------------------------------
+# Quantization
+# ---------------------------------------------------------------------------
+
+def quantize_weights(checkpoint: Path):
+    """Quantize the checkpoint to 4-bit signed weights (biases dropped).
+
+    Returns ``(w1, w2, scales, bias_norms)`` where ``w1`` is (784, 128) --
+    the transpose of ``hidden.weight`` -- and ``w2`` is (128, 10), the
+    transpose of ``output.weight``.
+    """
+    import torch
+
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    sd = ckpt["state_dict"]
+    w_hidden = sd["hidden.weight"].to(torch.float64).numpy()  # (128, 784)
+    w_output = sd["output.weight"].to(torch.float64).numpy()  # (10, 128)
+    if w_hidden.shape != (N_HIDDEN, N_INPUT):
+        raise ValueError(
+            f"hidden.weight shape {w_hidden.shape}, expected ({N_HIDDEN}, {N_INPUT})"
+        )
+    if w_output.shape != (N_OUTPUT, N_HIDDEN):
+        raise ValueError(
+            f"output.weight shape {w_output.shape}, expected ({N_OUTPUT}, {N_HIDDEN})"
+        )
+
+    bias_norms = {
+        "hidden_bias_l2": float(sd["hidden.bias"].norm()),
+        "output_bias_l2": float(sd["output.bias"].norm()),
+    }
+
+    def quant(matrix: np.ndarray):
+        scale = float(np.max(np.abs(matrix))) / SCALE_FACTOR
+        if scale == 0.0:
+            raise ValueError("degenerate weight matrix (all zeros)")
+        q = np.clip(np.rint(matrix / scale), -8, 7).astype(np.int64)
+        return q, scale
+
+    w1, s1 = quant(w_hidden.T)   # (784, 128)
+    w2, s2 = quant(w_output.T)   # (128, 10)
+    return w1, w2, {"hidden": s1, "output": s2}, bias_norms
+
+
+def pack_word(weights_row, width_bits: int) -> int:
+    """Pack one ROM word: neuron n in bits [4n+3:4n], two's complement."""
+    word = 0
+    for n, w in enumerate(weights_row):
+        word |= (int(w) & 0xF) << (4 * n)
+    mask = (1 << width_bits) - 1
+    if word > mask:
+        raise ValueError("packed weight word exceeds its width")
+    return word
+
+
+def write_weight_files(w1: np.ndarray, w2: np.ndarray) -> None:
+    """Write hidden_w.mem (784 words x 128 neurons) and output_w.mem (128 x 10)."""
+    hidden_words = [pack_word(w1[i], N_HIDDEN * W_W) for i in range(N_INPUT)]
+    output_words = [pack_word(w2[n], N_OUTPUT * W_W) for n in range(N_HIDDEN)]
+    write_hex(HIDDEN_WEIGHT_MEM, hidden_words, N_HIDDEN * W_W)
+    write_hex(OUTPUT_WEIGHT_MEM, output_words, N_OUTPUT * W_W)
+    print(f"wrote {HIDDEN_WEIGHT_MEM} ({N_INPUT} words x {N_HIDDEN * W_W} bits)")
+    print(f"wrote {OUTPUT_WEIGHT_MEM} ({N_HIDDEN} words x {N_OUTPUT * W_W} bits)")
+
+
+# ---------------------------------------------------------------------------
+# Event stream export
+# ---------------------------------------------------------------------------
+
+def event_word(event: SpikeEvent, row: int) -> int:
+    """Encode one entry as a 16-bit word."""
+    if event.is_overflow:
+        return OVERFLOW_CODE  # 0x00FF: neg=0, column=0, dt=0xFF
+    column = int(event.input_index) - row * IMAGE_COLS
+    if not 0 <= column < IMAGE_COLS:
+        raise ValueError(f"event column {column} out of range in row {row}")
+    neg = 1 if int(event.polarity) < 0 else 0
+    dt = int(event.delta_time)
+    if dt < 0 or dt >= OVERFLOW_CODE:
+        raise ValueError(f"event dt {dt} out of regular range")
+    return (neg << 13) | (column << 8) | dt
+
+
+def export_stream(streams, stream_path: Path, base_path: Path) -> list[int]:
+    """Write stream.mem (rows concatenated) and base_table.mem (28 entries)."""
+    words: list[int] = []
+    bases: list[int] = []
+    for row, events in enumerate(streams):
+        bases.append(len(words))
+        if len(events) >= (1 << COUNT_W):
+            raise ValueError(f"row {row} exceeds the {COUNT_W}-bit count word")
+        words.append(len(events))  # count word
+        for ev in events:
+            words.append(event_word(ev, row))
+    write_hex(stream_path, words, 16)
+    write_hex(base_path, bases, 16)
+    return bases
+
+
+def build_synthetic_streams():
+    """Hand-built 28-row streams exercising overflow and same-time repeats.
+
+    Row 0: two same-time events at time 0, an overflow entry, then an event
+    after a total gap above 255 plus a same-time repeat. Row 1: one event.
+    Rows 2..27 stay empty. input_index = row * 28 + column.
+    """
+    streams = [[] for _ in range(IMAGE_ROWS)]
+    streams[0] = [
+        SpikeEvent(0, 0, 1),                  # time 0, column 0
+        SpikeEvent(0, 0, 1),                  # time 0 repeat
+        SpikeEvent(None, OVERFLOW_CODE, 0),   # time 0 -> 255 (overflow)
+        SpikeEvent(1, 45, -1),                # time 300, column 1 (gap > 255)
+        SpikeEvent(1, 0, -1),                 # time 300 repeat
+    ]
+    streams[1] = [
+        SpikeEvent(IMAGE_COLS + 2, 10, 1),    # time 10, row 1 column 2
+    ]
+    return streams
+
+
+# ---------------------------------------------------------------------------
+# Golden files
+# ---------------------------------------------------------------------------
+
+def write_golden_file(streams, w1, w2, theta: int, label: int, path: Path) -> None:
+    """Run the integer reference and write the golden text for one image."""
+    digit, counts, hidden_pot, output_pot, trace = run_image(
+        streams, w1, w2, theta=theta
+    )
+    lines = []
+    for event_time, hspk, ospk in trace:
+        lines.append(f"TRACE {event_time} {hspk} {ospk}")
+    lines.append(f"DIGIT {digit}")
+    lines.append("COUNTS " + " ".join(str(int(c)) for c in counts))
+    lines.append("OPOT " + " ".join(str(v) for v in output_pot))
+    lines.append("HPOT " + " ".join(str(v) for v in hidden_pot))
+    lines.append(f"LABEL {label}")
+    os.makedirs(path.parent, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Golden test-set preparation
+# ---------------------------------------------------------------------------
+
+def has_same_time_repeat(streams) -> bool:
+    for row in streams:
+        times = [t for t, _, _ in row] if row and isinstance(row[0], tuple) else None
+        if times is None:
+            times = [e.delta_time for e in row]
+            # consecutive zero deltas mark same-time repeats
+            if any(dt == 0 for dt in times):
+                return True
+        else:
+            if any(times[i] == times[i + 1] for i in range(len(times) - 1)):
+                return True
+    return False
+
+
+def prepare_golden_set(checkpoint: Path, theta: int, count: int, out_dir: Path) -> None:
+    """Quantize weights, export N real test images plus the synthetic stream."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    w1, w2, scales, bias_norms = quantize_weights(checkpoint)
+    write_weight_files(w1, w2)
+    print(
+        "scales: hidden={hidden:.6g} output={output:.6g}; bias norms: {norms}".format(
+            hidden=scales["hidden"],
+            output=scales["output"],
+            norms=bias_norms,
+        )
+    )
+
     test_images = read_idx_images(MNIST_DIR / "t10k-images.idx3-ubyte")
     test_labels = read_idx_labels(MNIST_DIR / "t10k-labels.idx1-ubyte")
 
-    if train_limit:
-        train_images = train_images[:train_limit]
-        train_labels = train_labels[:train_limit]
-    if test_limit:
-        test_images = test_images[:test_limit]
-        test_labels = test_labels[:test_limit]
+    selected = 0
+    for img_idx in range(len(test_images)):
+        if selected >= count:
+            break
+        streams = delta_encode(test_images[img_idx].astype(np.float64) / 255.0)
+        if not has_same_time_repeat(streams):
+            continue  # need at least one image exercising same-time repeats
+        stem = f"img{img_idx}"
+        export_stream(streams, out_dir / f"{stem}_stream.mem", out_dir / f"{stem}_base.mem")
+        write_golden_file(streams, w1, w2, theta, int(test_labels[img_idx]),
+                          out_dir / f"{stem}_golden.txt")
+        print(f"exported {stem} (label {int(test_labels[img_idx])})")
+        selected += 1
 
-    # Build placeholder weight arrays (all zeros) for the sweep.
-    w_hidden = np.zeros((784, 128), dtype=np.int64)
-    w_out = np.zeros((128, 10), dtype=np.int64)
+    if selected == 0:
+        raise RuntimeError("no exported test image contains a same-time repeat")
 
-    results = []
-    for theta in range(4, 33):
-        correct = 0
-        for img, label in zip(train_images[:500], train_labels[:500]):
-            streams = delta_encode(img)
-            digit, _, _, _, _ = run_image(streams, w_hidden, w_out, theta=theta)
-            if digit == int(label):
-                correct += 1
-        acc = correct / 500.0
-        results.append((theta, acc))
-        print(f"  theta={theta:3d}: train_acc={acc:.4f}")
+    # Synthetic overflow stream (hand-built; MNIST never produces overflow).
+    streams = build_synthetic_streams()
+    export_stream(streams, out_dir / "synthetic_stream.mem", out_dir / "synthetic_base.mem")
+    write_golden_file(streams, w1, w2, theta, -1, out_dir / "synthetic_golden.txt")
+    print("exported synthetic overflow stream")
 
-    best_theta = max(results, key=lambda x: x[1])[0]
-    print(f"Best theta (train subset): {best_theta} (acc={max(r for r in results):.4f})")
 
-    test_correct = 0
-    for img, label in zip(test_images, test_labels):
-        streams = delta_encode(img)
-        digit, _, _, _, _ = run_image(streams, w_hidden, w_out, theta=best_theta)
-        if digit == int(label):
-            test_correct += 1
-    test_acc = test_correct / len(test_images)
-    print(f"Test accuracy with theta={best_theta}: {test_acc:.4f} ({test_correct}/{len(test_images)})")
-    return best_theta, test_acc
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", type=Path,
+                        default=WEIGHT_DIR / "mnist_snn.pt")
+    parser.add_argument("--theta", type=int, default=16)
+    parser.add_argument("--count", type=int, default=3,
+                        help="number of real MNIST test images to export")
+    parser.add_argument("--out-dir", type=Path, default=GOLDEN_DIR)
+    args = parser.parse_args()
+    prepare_golden_set(args.checkpoint, args.theta, args.count, args.out_dir)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", type=Path, default=MNIST_DIR)
-    parser.add_argument("--out-dir", type=Path, default=EVENT_DIR)
-    parser.add_argument("--train-limit", type=int, default=5000)
-    parser.add_argument("--test-limit", type=int, default=None)
-    args = parser.parse_args()
+    main()
 
-    build_event_rom(
-        images=read_idx_images(args.data_dir / "t10k-images.idx3-ubyte")[:10],
-        labels=read_idx_labels(args.data_dir / "t10k-labels.idx1-ubyte")[:10],
-        out_dir=args.out_dir,
-    )
-    write_weight_files(args.out_dir)
-    write_synthetic_overflow_stream(args.out_dir)
-    sweep_theta(train_limit=args.train_limit, test_limit=args.test_limit)
-
-
-def write_weight_files(out_dir: Path) -> None:
-    """Copy generated weight files (already match the required packed layout)."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    hidden_src = REPO_ROOT / "data" / "weights" / "hidden_w.mem"
-    output_src = REPO_ROOT / "data" / "weights" / "output_w.mem"
-
-    for s, d in [(hidden_src, out_dir / "hidden_w.mem"), (output_src, out_dir / "output_w.mem")]:
-        if not s.exists():
-            raise FileNotFoundError(f"missing weight source: {s}")
-        import shutil
-        shutil.copy2(s, d)
-        print(f"Wrote {d} ({sum(1 for _ in open(d))} lines)")
-
-
-def write_synthetic_overflow_stream(out_dir: Path) -> None:
-    """Synthetic stream with an overflow entry and a time gap above 255."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "synthetic_overflow.mem"
-    with open(path, "w") as f:
-        f.write("// Synthetic overflow stream for RTL verification.\n")
-        f.write("// Row 0: events at times 0, 300; overflow at time 100.\n")
-        f.write("// Row 1: events at times 0, 400.\n")
-        f.write("0x0000\n")  # time 0
-        f.write("0x00FF\n")  # overflow
-        f.write("0x012C\n")  # time 300 (0x12C = 300)
-        f.write("0x0000\n")
-        f.write("0x0190\n")  # time 400 (0x190 = 400)
-    print(f"Wrote synthetic overflow stream to {path}")
-
-
-def build_event_rom(images, labels, out_dir):
-    """Write event files (one per image) plus per-row base-address table."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    streams = [delta_encode(img) for img in images]
-    labels_arr = np.asarray(labels, dtype=np.uint8)
-
-    row_address_table = []
-    merged_events = []
-    labels_out = []
-
-    for img_idx, streams_img in enumerate(streams):
-        row_addrs = []
-        merged = []
-        next_addr = 0
-
-        for row_idx, row_events in enumerate(streams_img):
-            row_events.sort(key=lambda x: x[0])
-            count = len(row_events)
-            if count >= 1 << 10:
-                raise ValueError(f"row {row_idx} exceeds 10-bit count")
-
-            row_addrs.append(next_addr)
-            merged.append(count)
-            for abs_time, neg, col in row_events:
-                word = neg | (col << 1) | (abs_time << 6)
-                merged.append(word)
-            next_addr += 1 + count
-
-        merged_events.append(merged)
-        labels_out.append(int(labels_arr[img_idx]))
-
-        # Per-image event file
-        ev_path = out_dir / f"img{img_idx}_events.mem"
-        with open(ev_path, "w") as f:
-            f.write(HEADERS["event"])
-            f.write(f"// Image label: {labels_out[-1]}\n")
-            for row_idx, row_events in enumerate(streams_img):
-                f.write(f"// Row {row_idx} count: {len(row_events)}\n")
-                for abs_time, neg, col in row_events:
-                    word = neg | (col << 1) | (abs_time << 6)
-                    f.write(f"{word:04x}\n")
-            f.write("\n\n")
-
-        # Merged ROM file
-        merge_path = out_dir / f"img{img_idx}_merged.mem"
-        with open(merge_path, "w") as f:
-            f.write(HEADERS["event"])
-            merged = []
-            for row_idx, row_events in enumerate(streams_img):
-                merged.append(len(row_events))
-                for abs_time, neg, col in row_events:
-                    word = neg | (col << 1) | (abs_time << 6)
-                    merged.append(word)
-            write_hex(merge_path, merged, 16)
-
-        row_address_table.extend(row_addrs)
-
-    # Labels
-    lbl_path = out_dir / "labels.mem"
-    with open(lbl_path, "w") as f:
-        f.write(HEADERS["labels"])
-        for lab in labels_out:
-            f.write(f"{lab}\n")
-
-    print(f"Wrote {len(streams)} event ROM files to {out_dir}")
-    print(f"Wrote labels to {lbl_path}")

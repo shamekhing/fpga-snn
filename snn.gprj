@@ -12,6 +12,7 @@
         <File path="src/rtl/core/spike_counter.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/core/time_integrator.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/mem/stream_rom.sv" type="file.verilog" enable="1"/>
+        <File path="src/rtl/mem/base_rom.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/mem/weight_rom.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/top/snn_top.sv" type="file.verilog" enable="1"/>
         <File path="src/rtl/util/argmax.sv" type="file.verilog" enable="1"/>
