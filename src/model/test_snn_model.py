@@ -64,26 +64,43 @@ class LifStepTests(unittest.TestCase):
 
 class RunImageTests(unittest.TestCase):
     def test_merges_simultaneous_hidden_spikes_for_output_layer(self) -> None:
+        # Two streams (row 0 and row 1) with events at the same time.
+        # w_hidden = [pixel0][pixel1] with 2 hidden neurons each.
+        # weight address = row*28 + column; use column 0 for both rows.
         streams = [
-            [SpikeEvent(0, 0, 1)],
-            [SpikeEvent(1, 0, 1)],
+            [SpikeEvent(0, 0, 1)],   # row 0, col 0 -> addr 0*28+0 = 0
+            [SpikeEvent(28, 0, 1)],  # row 1, col 0 -> addr 1*28+0 = 28
         ]
-        w_hidden = np.array([[10, 10], [10, 10]], dtype=np.int8)
-        w_out = np.array([[9, 7], [9, 7]], dtype=np.int8)
+        w_hidden = np.zeros((784, 2), dtype=np.int64)
+        w_hidden[0] = [10, 10]
+        w_hidden[28] = [10, 10]
+        w_out = np.array([[9, 7], [9, 7]], dtype=np.int64)
 
-        digit, counts = run_image(streams, w_hidden, w_out)
+        digit, counts, hidden_pot, output_pot, trace = run_image(
+            streams, w_hidden, w_out
+        )
 
         self.assertEqual(digit, 0)
         np.testing.assert_array_equal(counts, [1, 0])
+        # One event time, hidden spikes = 2 (both neurons), output spikes = 1
+        self.assertEqual(trace, [(0, 2, 1)])
 
-    def test_zero_delta_spikes_from_one_row_are_processed_separately(self) -> None:
+    def test_zero_delta_events_are_accumulated_at_one_time(self) -> None:
+        # Two same-time events from one row must be summed into a single
+        # accumulator, then one neuron update. Both events at time 0.
         streams = [[SpikeEvent(0, 0, 1), SpikeEvent(0, 0, 1)]]
-        w_hidden = np.array([[10]], dtype=np.int8)
-        w_out = np.array([[16]], dtype=np.int8)
+        w_hidden = np.array([[10]], dtype=np.int64)
+        w_out = np.array([[16]], dtype=np.int64)
 
-        _, counts = run_image(streams, w_hidden, w_out)
+        digit, counts, hidden_pot, output_pot, trace = run_image(
+            streams, w_hidden, w_out
+        )
 
-        np.testing.assert_array_equal(counts, [1])
+        # Acceleration: 10 + 10 = 20, 20 >= 16 so neuron fires with 20 - 16 = 4
+        self.assertEqual(hidden_pot[0], 4)
+        self.assertEqual(counts[0], 1)
+        # One event time, hidden 1 spike, output 1 spike
+        self.assertEqual(trace, [(0, 1, 1)])
 
     def test_overflow_advances_time_without_updating_neurons(self) -> None:
         streams = [[
@@ -91,25 +108,43 @@ class RunImageTests(unittest.TestCase):
             SpikeEvent(None, 255, 0),
             SpikeEvent(1, 0, 1),
         ]]
-        w_hidden = np.array([[8], [16]], dtype=np.int8)
-        w_out = np.array([[22]], dtype=np.int8)
+        w_hidden = np.zeros((784, 2), dtype=np.int64)
+        w_hidden[0] = [8, 8]   # row 0, col 0 -> addr 0
+        w_hidden[1] = [16, 16] # row 0, col 1 -> addr 1
+        w_out = np.array([[22, 22], [22, 22]], dtype=np.int64)
 
-        _, counts = run_image(streams, w_hidden, w_out, theta=22)
+        digit, counts, hidden_pot, output_pot, trace = run_image(
+            streams, w_hidden, w_out, theta=22
+        )
 
-        np.testing.assert_array_equal(counts, [0])
+        # Each event time has its own accumulator.
+        # Each event time has its own accumulator.
+        # Event at time 0: addr 0 contributes 8 to both neurons
+        #   acc = [8, 8]
+        #   elapsed = 0; decayed = 0; summed = 8 < 22; no spike
+        #   hidden_pot = [8, 8]
+        # Overflow: time advances by 255 (no contribution)
+        # Event at time 255: addr 1 contributes 16 to both neurons
+        #   acc = [16, 16]
+        #   elapsed = 255; decayed = 8 >> 255 = 0; summed = 0 + 16 = 16 < 22; no spike
+        #   hidden_pot = [16, 16] (updated because sum < threshold, new sum = 16)
+        np.testing.assert_array_equal(counts, [0, 0])
+        self.assertEqual(hidden_pot[0], 16)
+        self.assertEqual(hidden_pot[1], 16)
+        self.assertEqual(trace, [(0, 0, 0), (255, 0, 0)])
 
     def test_rejects_malformed_events_and_weight_shapes(self) -> None:
         with self.assertRaises(ValueError):
             run_image(
                 [[SpikeEvent(None, 255, 1)]],
-                np.ones((1, 1), dtype=np.int8),
-                np.ones((1, 1), dtype=np.int8),
+                np.ones((1, 1), dtype=np.int64),
+                np.ones((1, 1), dtype=np.int64),
             )
         with self.assertRaises(ValueError):
             run_image(
                 [],
-                np.ones((1, 2), dtype=np.int8),
-                np.ones((1, 1), dtype=np.int8),
+                np.ones((1, 2), dtype=np.int64),
+                np.ones((1, 1), dtype=np.int64),
             )
 
 
