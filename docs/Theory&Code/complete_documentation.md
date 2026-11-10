@@ -95,7 +95,7 @@ The following components exist:
 | `src/rtl/` | SystemVerilog RTL: package, cores, memories, top level |
 | `src/tb/` | SystemVerilog testbenches for RTL simulation |
 | `src/scripts/` | Icarus Verilog run script, Gowin build TCL template |
-| `src/data/` | MNIST IDX, event streams, weight ROMs (all git-ignored) |
+| `data/` | MNIST IDX, event streams, weight ROMs (all git-ignored) |
 | `src/constraints/` | Gowin pin constraints (`.cst`) and timing constraints (`.sdc`) |
 | `impl/` | Gowin synthesis, place-and-route, temporary parser output (git-ignored) |
 | `ignore/` | Simulator traces and generated artifacts (git-ignored) |

@@ -18,8 +18,8 @@ encoded time is independent of the FPGA clock cycles needed to process them.
 
 ## Contents
 
-This README is at the repository root. Source code is under `src/`; generated
-implementation output is under `impl/`.
+This README is at the repository root. Source code is under `src/`; local data is under `data/`; generated
+implementation and simulation output is under `impl/`.
 
 | Path | Purpose |
 |---|---|
@@ -32,9 +32,9 @@ implementation output is under `impl/`.
 | `src/model/test_snn_model.py` | Tests for event encoding and the integer reference. |
 | `src/model/test_train_snn.py` | Tests for MNIST IDX loading and training-input preparation. |
 | `src/model/requirements-model.txt` | Optional CPU-capable Python dependencies for training. |
-| `src/data/mnist/` | Local MNIST training and test images in IDX format; ignored by Git. |
-| `src/data/streams/` | Local generated event-stream ROM images; ignored by Git. |
-| `src/data/weights/` | Local checkpoints and generated weight ROM images; ignored by Git. |
+| `data/mnist/` | Local MNIST training and test images in IDX format; ignored by Git. |
+| `data/streams/` | Local generated event-stream ROM images; ignored by Git. |
+| `data/weights/` | Local checkpoints and generated weight ROM images; ignored by Git. |
 | `src/rtl/util/pkg_snn.sv` | Shared network sizes, numeric widths, thresholds, and overflow code. |
 | `src/rtl/core/time_integrator.sv` | Accumulates differential times into absolute time for one stream. |
 | `src/rtl/core/event_sched.sv` | Clocked serial minimum-time scan across pending row-stream events. |
@@ -49,7 +49,7 @@ implementation output is under `impl/`.
 | `src/scripts/build.tcl` | Gowin build-script template; it does not yet execute a build. |
 | `src/constraints/tang_primer_20k.cst` | Board constraints; currently only the clock pin is assigned. |
 | `snn.gprj` | Gowin project file. |
-| `impl/` | Local Gowin process configuration and generated implementation files. |
+| `impl/` | Local Gowin process configuration, simulation output in `impl/temp/`, and generated implementation files. |
 | `ignore/` | Reserved for local/generated files that should not be committed. |
 
 ## FPGA project workflow
@@ -131,7 +131,7 @@ format required by the current ROM templates.
 
 ## MNIST data and training
 
-The trainer expects these files under `src/data/mnist/`:
+The trainer expects these files under `data/mnist/`:
 
 ```text
 train-images.idx3-ubyte
@@ -146,9 +146,9 @@ dimensions, file lengths, label values, and matching image/label counts.
 
 ### Obtain the local data
 
-All datasets, checkpoints, and ROM images under `src/data/` are intentionally
+All datasets, checkpoints, and ROM images under `data/` are intentionally
 ignored by Git. From `src/`, download the standard MNIST IDX files into
-`src/data/mnist/`:
+`data/mnist/`:
 
 ```bash
 mkdir -p data/mnist
@@ -159,7 +159,7 @@ curl -fsSL "$base/t10k-images-idx3-ubyte" -o data/mnist/t10k-images.idx3-ubyte
 curl -fsSL "$base/t10k-labels-idx1-ubyte" -o data/mnist/t10k-labels.idx1-ubyte
 ```
 
-From `src/`, the trainer creates `src/data/weights/mnist_snn.pt` after training:
+From `src/`, the trainer creates `data/weights/mnist_snn.pt` after training:
 
 ```bash
 cd src
@@ -168,8 +168,8 @@ python -m model.train_snn --epochs 10
 
 `src/model/export_mem.py` currently provides only the `$readmemh` writer; the
 checkpoint-to-ROM export is not implemented yet. Therefore
-`src/data/streams/stream.mem`, `src/data/weights/hidden_w.mem`, and
-`src/data/weights/output_w.mem` must be supplied by a compatible export script or
+`data/streams/stream.mem`, `data/weights/hidden_w.mem`, and
+`data/weights/output_w.mem` must be supplied by a compatible export script or
 copied from a known-good local artifact before running the FPGA ROM simulation.
 
 ### Install optional training dependencies
@@ -229,7 +229,7 @@ python -m model.train_snn \
 
 ### Existing checkpoint
 
-If you have generated `src/data/weights/mnist_snn.pt`, it contains a checkpoint
+If you have generated `data/weights/mnist_snn.pt`, it contains a checkpoint
 trained with 128 hidden neurons, 10 epochs, seed 0, and the full supplied MNIST
 splits. A previous local run recorded **92.65%** test accuracy (10,000 images);
 that result describes the Python model only and is not guaranteed for every
@@ -307,7 +307,7 @@ smoke test: it does not compare an inference result against a Python golden
 trace.
 
 **Simulation caveat:** `stream_rom.sv` and `weight_rom.sv` call `$readmemh` for
-`src/data/streams/stream.mem` and `src/data/weights/hidden_w.mem`. Those files are not
+`data/streams/stream.mem` and `data/weights/hidden_w.mem`. Those files are not
 provided by the training workflow, so simulations that elaborate these ROMs
 currently print missing-file errors. The testbench may still exit with status
 zero; that does not make the top-level an inference pass.
@@ -342,8 +342,8 @@ not make the design buildable or operational:
   currently bounded at 1024 cycles while end-of-stream handling is finalized.
 - Hidden-neuron processing is time-multiplexed, reducing arithmetic replication
   at the cost of up to `N_HIDDEN` processing cycles per input event.
-- Local `src/data/streams/stream.mem`, `src/data/weights/hidden_w.mem`, and
-  `src/data/weights/output_w.mem` files are non-constant structural test
+- Local `data/streams/stream.mem`, `data/weights/hidden_w.mem`, and
+  `data/weights/output_w.mem` files are non-constant structural test
   images when present. They prove ROM inference and resource mapping, not
   trained-model accuracy, and are ignored by Git.
 - `src/scripts/build.tcl` only declares the target and file paths; it has a TODO

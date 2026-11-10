@@ -7,7 +7,6 @@ impl/temp/
 *.gprj.user
 *.vvp
 *.vcd
-src/impl/
 
 # Local model environments and Python caches.
 .venv/
@@ -15,16 +14,14 @@ __pycache__/
 *.py[cod]
 
 # Local datasets, checkpoints, and generated ROM images.
-/data
-!/data/.gitkeep
-src/data/*
-!src/data/.gitkeep
-src/data/mnist/*
-!src/data/mnist/.gitkeep
-src/data/streams/*
-!src/data/streams/.gitkeep
-src/data/weights/*
-!src/data/weights/.gitkeep
+data/*
+!data/.gitkeep
+data/mnist/*
+!data/mnist/.gitkeep
+data/streams/*
+!data/streams/.gitkeep
+data/weights/*
+!data/weights/.gitkeep
 
 # The repository reserves this directory for other local/generated files.
 ignore/*

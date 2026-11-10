@@ -15,7 +15,7 @@ module tb_snn_top;
   always #5 clk = ~clk;
 
   initial begin
-    $dumpfile("../ignore/tb_snn_top.vcd");
+    $dumpfile("ignore/tb_snn_top.vcd");
     $dumpvars(0, tb_snn_top);
     #20 rst_n = 1;
     @(posedge clk); start = 1;

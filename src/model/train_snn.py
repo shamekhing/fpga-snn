@@ -24,6 +24,9 @@ NEURON_THRESHOLD = 1.0
 NEURON_BETA = 0.5
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
 def read_idx_images(path: str | Path) -> np.ndarray:
     """Read an uncompressed MNIST IDX image file."""
     data = Path(path).read_bytes()
@@ -271,8 +274,14 @@ def train(args: argparse.Namespace) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", type=Path, default=Path("data/mnist"))
-    parser.add_argument("--output", type=Path, default=Path("data/weights/mnist_snn.pt"))
+    parser.add_argument(
+        "--data-dir", type=Path, default=REPOSITORY_ROOT / "data" / "mnist"
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=REPOSITORY_ROOT / "data" / "weights" / "mnist_snn.pt",
+    )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--hidden-size", type=int, default=HIDDEN_SIZE)

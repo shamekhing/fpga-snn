@@ -14,7 +14,7 @@
 ## IDX loading
 
 `load_mnist` expects the four standard uncompressed files in
-`src/data/mnist/`. The loader checks:
+`data/mnist/`. The loader checks:
 
 - image and label magic numbers;
 - exact file lengths;
@@ -85,7 +85,7 @@ cd src
 python -m model.train_snn --epochs 10
 ```
 
-The default checkpoint is `src/data/weights/mnist_snn.pt`. MNIST files,
+The default checkpoint is `data/weights/mnist_snn.pt`. MNIST files,
 checkpoints, and ROM images are ignored by Git; obtain them locally as
 described in the root [README](../../README.md#mnist-data-and-training).
 

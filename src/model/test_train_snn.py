@@ -44,7 +44,7 @@ class IdxReaderTests(unittest.TestCase):
                 read_idx_labels(label_path)
 
     def test_loads_supplied_mnist_dataset(self) -> None:
-        root = Path(__file__).resolve().parents[1] / "data" / "mnist"
+        root = Path(__file__).resolve().parents[2] / "data" / "mnist"
         train_images, train_labels, test_images, test_labels = load_mnist(root)
         self.assertEqual(train_images.shape, (60000, 28, 28))
         self.assertEqual(train_labels.shape, (60000,))

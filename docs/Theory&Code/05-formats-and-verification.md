@@ -6,9 +6,9 @@ The following paths are intentionally ignored:
 
 | Path | Contents |
 |---|---|
-| `src/data/mnist/` | MNIST IDX images and labels |
-| `src/data/streams/` | Generated event-stream ROM data |
-| `src/data/weights/` | Checkpoints and generated weight ROM data |
+| `data/mnist/` | MNIST IDX images and labels |
+| `data/streams/` | Generated event-stream ROM data |
+| `data/weights/` | Checkpoints and generated weight ROM data |
 | `ignore/` | Simulator traces and other generated artifacts |
 
 Create the directories and obtain MNIST from the instructions in the root
