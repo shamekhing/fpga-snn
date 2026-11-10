@@ -11,10 +11,13 @@ between spike times. Hardware processes those events in order, while the
 encoded time is independent of the FPGA clock cycles needed to process them.
 
 > **Implementation status:** the Python MNIST trainer, event encoder, integer
-> reference model, and several RTL building blocks exist. The scheduler and
-> top-level datapath are now structurally connected, but local ROM images are
-> non-constant structural test data rather than exported trained weights and
-> event streams. FPGA accuracy is therefore not claimed yet.
+> reference model, 4-bit quantizer/exporter, and the full RTL datapath
+> (28 row sequencers, scheduler, accumulator, hidden/output layers) exist.
+> The RTL and the integer reference now agree **bit-exactly** on the golden
+> test set: per-event-time spike traces, final potentials, output spike
+> counts, and digit all match (see "Golden-trace test" below). The local ROM
+> weights are quantized from the trained checkpoint; FPGA synthesis, timing,
+> and on-board results are still not claimed.
 
 ## Contents
 
@@ -26,9 +29,10 @@ implementation and simulation output is under `impl/`.
 | `src/model/train_snn.py` | Loads MNIST IDX files, prepares differential-time input, trains an snnTorch network, evaluates it, and saves a PyTorch checkpoint. |
 | `src/model/encode_mnist.py` | Converts an image into signed, differential-time events, keeping one independent event stream per row. |
 | `src/model/spike_events.py` | Shared Python event representation and overflow-code constants. |
-| `src/model/snn_ref.py` | Integer, event-driven reference for hidden and output LIF layers. |
-| `src/model/quantize.py` | Standalone float-to-signed-integer weight quantization helper; not yet integrated with training/export. |
-| `src/model/export_mem.py` | Standalone `$readmemh`-style hexadecimal writer; model-specific serialization is not yet implemented. |
+| `src/model/snn_ref.py` | Integer, event-driven reference for hidden and output LIF layers; per-time accumulation, 16-bit overflow guards, and the golden-trace writer. |
+| `src/model/quantize.py` | Standalone float-to-signed-integer weight quantization helper; superseded by the quantizer inside `export_mem.py`. |
+| `src/model/export_mem.py` | Quantizes the checkpoint (4-bit signed, one scale per layer) and writes the event ROMs, base-address table, weight ROMs, labels, and golden files. |
+| `src/model/sweep_theta.py` | Sweeps the integer threshold on the training subset and reports the quantized reference's test accuracy, with and without biases. |
 | `src/model/test_snn_model.py` | Tests for event encoding and the integer reference. |
 | `src/model/test_train_snn.py` | Tests for MNIST IDX loading and training-input preparation. |
 | `src/model/requirements-model.txt` | Optional CPU-capable Python dependencies for training. |
@@ -39,13 +43,14 @@ implementation and simulation output is under `impl/`.
 | `src/rtl/core/time_integrator.sv` | Accumulates differential times into absolute time for one stream. |
 | `src/rtl/core/event_sched.sv` | Clocked serial minimum-time scan across pending row-stream events. |
 | `src/rtl/core/lif_neuron.sv` | Signed-event LIF update, optional negative-threshold firing, and reset-to-mod. |
-| `src/rtl/core/lif_layer.sv` | Time-multiplexed hidden LIF layer sharing one decay/add/threshold datapath. |
-| `src/rtl/core/lif_layer_parallel.sv` | Parallel LIF layer used for the small output layer. |
+| `src/rtl/core/lif_layer.sv` | Time-multiplexed hidden LIF layer; consumes the precomputed accumulator vector and elapsed time. |
+| `src/rtl/core/lif_layer_parallel.sv` | Parallel output LIF layer; consumes `acc_out` and the output elapsed time. |
 | `src/rtl/core/spike_counter.sv`, `src/rtl/util/argmax.sv` | Output spike counts and winner selection. |
-| `src/rtl/mem/` | Current stream and hidden-weight ROM templates. |
-| `src/rtl/top/snn_top.sv` | Top-level stream scheduler, hidden/output LIF layers, counters, and argmax integration. |
-| `src/tb/` | SystemVerilog testbenches for the time integrator, event scheduler, LIF neuron, and top-level integration. |
-| `src/scripts/run_sim.sh` | Compiles and runs the RTL testbenches with Icarus Verilog. |
+| `src/rtl/mem/` | Event stream ROM, base-address table ROM, and the two weight ROMs. |
+| `src/rtl/top/snn_top.sv` | Top-level row sequencers, scheduler, accumulator, hidden/output layers, counters, argmax, and `done`. |
+| `src/tb/` | SystemVerilog testbenches; `tb_snn_top.sv` is the golden-trace comparison. |
+| `src/scripts/run_sim.sh` | Runs the unit benches and the per-image golden tests end to end. |
+| `src/scripts/compare_golden.py` | Compares RTL golden-test output against the Python reference's golden file. |
 | `src/scripts/build.tcl` | Gowin build-script template; it does not yet execute a build. |
 | `src/constraints/tang_primer_20k.cst` | Board constraints; currently only the clock pin is assigned. |
 | `snn.gprj` | Gowin project file. |
@@ -103,7 +108,7 @@ input-difference threshold is `0.05`. These are trainer settings, not values
 automatically shared with the RTL or integer reference. The batch encoder
 represents multiple same-time unit events by their signed integer amplitude.
 It is a training representation, not the serialized, per-row delta stream
-format required by the current ROM templates.
+format used by the ROMs (see "Quantization and memory export").
 
 ### Current RTL blocks
 
@@ -120,14 +125,21 @@ format required by the current ROM templates.
 - **LIF neuron:** applies an arithmetic right-shift decay, adds the signed
   synaptic input, and subtracts the positive threshold on firing. Negative
   threshold firing can be enabled by a parameter; it is disabled by default.
-- **LIF layer:** sign-adjusts each neuron's weight according to the incoming
-  event polarity. The hidden layer updates one neuron per clock using shared
-  arithmetic; the output layer remains parallel because it has only ten lanes.
-- **Spike counter and argmax:** count output spikes and choose the largest
-  count, with ties resolved to the lowest index.
-- **Top level:** transitions from idle to run to finish and connects the
-  scheduler, shared stream memory, weight memories, neuron layers, counters,
-  and argmax.
+  Shifts of 16 or more saturate to the sign bit.
+- **LIF layers:** `lif_layer` (hidden, 128 neurons) updates one neuron per
+  clock from a precomputed accumulator vector and an elapsed-time input;
+  `lif_layer_parallel` (output, 10 neurons) updates all lanes in the same
+  cycle from `acc_out` and its own elapsed time. Both accumulate their spike
+  banks across the update and pulse `event_done` when finished.
+- **Spike counter and argmax:** count output spikes (flat packed count bus)
+  and choose the largest count, with ties resolved to the lowest index.
+- **Top level:** a centralized sequencer initializes the 28 row streams from
+  the base-address table, feeds the scheduler with each row's next pending
+  time (`abs_time + delta_head`), consumes every same-time event of each tied
+  row into the accumulator (one weight-ROM read with one cycle of latency per
+  event), triggers exactly one hidden update per event time, accumulates the
+  output weights of the spiking hidden neurons, triggers exactly one output
+  update, and asserts `done` for one cycle once every row is exhausted.
 
 ## MNIST data and training
 
@@ -236,10 +248,11 @@ that result describes the Python model only and is not guaranteed for every
 training environment.
 
 This checkpoint stores floating-point snnTorch model parameters and metadata.
-It is not a Gowin memory image. The current quantizer, integer reference,
-SystemVerilog neuron, and ROM layout have not been validated as an equivalent
-inference path for this checkpoint. The reported accuracy therefore describes
-the Python snnTorch model only.
+It is not a Gowin memory image. `src/model/export_mem.py` quantizes it into the
+ROM images the RTL loads; the integer reference and the RTL then agree
+bit-exactly (see "Golden-trace test"). The quantized integer accuracy is
+lower than the floating-point model's because biases are dropped and weights
+are clipped to 4 bits; see "Accuracy" for the recorded numbers.
 
 ## Python model utilities
 
@@ -259,27 +272,50 @@ tensor.
 `src/model/snn_ref.py` is an integer event reference, not the PyTorch trainer.
 `lif_step` uses a power-of-two decay (`BETA_SHIFT = 1`, or beta 0.5), adds a
 signed synaptic input, and performs reset-to-mod at the positive threshold.
-An optional lower threshold enables negative spikes. `run_image` accepts
-integer hidden/output weight arrays and parallel input-row streams, merges
-events at equal absolute times, propagates hidden spikes to the output layer,
-and returns the predicted digit and output spike counts.
+An optional lower threshold enables negative spikes (unused by default).
 
-The reference's default threshold is 16 to match the current RTL package.
-The trainer uses threshold 1.0. To compare the trained model with integer or
-RTL inference, threshold, weight quantization, event grouping, overflow, and
-reset behavior still need to be reconciled and validated.
+`run_image` accepts integer hidden/output weight arrays and the 28 per-row
+streams. All regular events of one row at the same absolute time are summed
+into a single accumulator, then every neuron performs exactly one update per
+event time with `elapsed = t - t_last`; hidden spikes feed the output layer
+the same way. Potentials are kept in the signed 16-bit range the RTL uses and
+every intermediate is checked, so a silent wrap cannot pass the golden
+comparison. Optional `hidden_bias`/`output_bias` arguments reproduce the
+checkpoint's bias currents for accuracy experiments; the default (no bias)
+matches the RTL.
 
 ### Quantization and memory export
 
-`src/model/quantize.py` currently provides a simple signed-integer quantizer
-(default width 4 bits, range `-8` through `+7`) and returns a scale. It does
-not load the `.pt` checkpoint, preserve separate layer scales, or evaluate
-accuracy after quantization.
+`src/model/export_mem.py` performs the checkpoint-to-ROM export and writes the
+golden files. Weight quantization uses one scale per layer,
+`scale = max|W| / 8`, rounds to nearest (`numpy.rint`, half-to-even), and
+clips to the 4-bit signed range `[-8, 7]`. Biases are dropped: neither the
+reference nor the RTL implements them.
 
-`src/model/export_mem.py` currently provides `write_hex(path, values, width_bits)`.
-It writes one masked, zero-padded hexadecimal value per line. It does not yet
-define the stream-bank, packed-weight, output-weight, or checkpoint-to-ROM
-formats.
+Wire formats (must stay in sync with `src/rtl/util/pkg_snn.sv`):
+
+- **Event word** — 14 bits stored in a 16-bit word:
+  `word = (neg << 13) | (column << 8) | dt`. Overflow entries carry
+  `dt = 0xFF` with `column = 0` and `neg = 0` (word `0x00FF`) and advance the
+  row time only.
+- **Count word** — one per row before its event words, count in bits `[9:0]`.
+- **Base-address table** — one 16-bit entry per row, the stream-ROM address of
+  that row's count word (`data/streams/base_table.mem`).
+- **Event ROM** (`data/streams/stream.mem`) — rows concatenated in order
+  0..27, each row as count word plus event words.
+- **Hidden weights** (`data/weights/hidden_w.mem`) — 784 words (word index =
+  `row*28 + column`), each 512 bits holding 128 four-bit neurons; derived by
+  transposing the checkpoint's `hidden.weight` (128, 784).
+- **Output weights** (`data/weights/output_w.mem`) — 128 words (word index =
+  hidden neuron), each 40 bits holding 10 four-bit neurons; derived by
+  transposing `output.weight` (10, 128).
+- **Labels** — one per exported image.
+
+For the golden tests the exporter also writes, per selected image, an event
+ROM, a base-address table, and a golden file (see "Golden-trace test"). A
+synthetic stream with an overflow entry and a total time gap above 255 is
+exported beside the real MNIST images, since MNIST rows never produce
+overflow with 28 columns.
 
 ## Simulation and tests
 
@@ -290,9 +326,13 @@ the RTL regression from the repository root:
 bash src/scripts/run_sim.sh
 ```
 
-The script runs the focused time-integrator and event-scheduler benches, then
-the LIF-neuron and top-level benches. Icarus-generated `.vvp` outputs are
-written under `ignore/`; VCD traces are written under `ignore/`.
+The script runs the focused time-integrator and event-scheduler benches, the
+LIF-neuron bench, and then the golden-trace tests: for every exported image
+under `data/golden/` it runs `snn_top` and compares the RTL output against the
+Python reference's golden file with `src/scripts/compare_golden.py`. Any
+mismatch fails the run. If `data/golden/` is empty the script first regenerates
+the exported test set with `src/model/export_mem.py` (weights and event streams
+under `data/` are git-ignored generated files).
 
 Run the Python tests with NumPy installed from the repository root:
 
@@ -302,15 +342,29 @@ python -m unittest discover -s src/model -v
 
 The tests cover IDX parsing, supplied dataset dimensions, signed row-event
 encoding, delta-time overflow splitting, LIF behavior, scheduler ordering, and
-basic reference-model cases. The current top-level testbench is only an FSM
-smoke test: it does not compare an inference result against a Python golden
-trace.
+the reference model's accumulation-at-one-time and output-layer behavior.
 
-**Simulation caveat:** `stream_rom.sv` and `weight_rom.sv` call `$readmemh` for
-`data/streams/stream.mem` and `data/weights/hidden_w.mem`. Those files are not
-provided by the training workflow, so simulations that elaborate these ROMs
-currently print missing-file errors. The testbench may still exit with status
-zero; that does not make the top-level an inference pass.
+### Golden-trace test
+
+`src/model/export_mem.py --theta T` quantizes the checkpoint, writes
+`data/weights/hidden_w.mem` and `data/weights/output_w.mem`, and exports a
+small golden test set into `data/golden/`: three real MNIST test images (each
+selected to contain a same-time repeat so the accumulation path is exercised)
+plus one hand-built synthetic stream with an overflow entry and a total time
+gap above 255. For every image the integer reference writes a golden file
+with:
+
+- the ordered `(time, hidden_spikes, output_spikes)` trace per event time,
+- the final hidden potentials (128) and output potentials (10),
+- the per-neuron output spike counts (10), and
+- the predicted digit.
+
+`src/tb/tb_snn_top.sv` loads one image's event ROM and base table (runtime
+plusargs `+STREAM_FILE`/`+BASE_FILE`), runs `snn_top` to `done`, and prints
+the same fields in the same text format. `src/scripts/compare_golden.py`
+checks the RTL output against the golden file; any mismatch fails. The
+current exporter records **PASS** for all exported images (see "Accuracy"
+for the recorded run).
 
 ### Lint
 
@@ -338,21 +392,15 @@ configuration selects `snn_top` and SystemVerilog 2017.
 The project file lists the RTL and the pin constraints, but this alone does
 not make the design buildable or operational:
 
-- The top-level datapath is structurally integrated, but its control window is
-  currently bounded at 1024 cycles while end-of-stream handling is finalized.
-- Hidden-neuron processing is time-multiplexed, reducing arithmetic replication
-  at the cost of up to `N_HIDDEN` processing cycles per input event.
-- Local `data/streams/stream.mem`, `data/weights/hidden_w.mem`, and
-  `data/weights/output_w.mem` files are non-constant structural test
-  images when present. They prove ROM inference and resource mapping, not
-  trained-model accuracy, and are ignored by Git.
+- The event ROM models use runtime plusargs (`+STREAM_FILE`, `+BASE_FILE`)
+  for file selection in simulation. Gowin synthesis ignores plusargs, so the
+  ROM initialization needs a synthesis-friendly path (fixed file or BSRAM
+  template) before a real build.
 - `src/scripts/build.tcl` only declares the target and file paths; it has a TODO
   instead of Gowin project/build commands.
 - `src/constraints/tang_primer_20k.cst` currently constrains only `clk` to H11.
   Confirm the pin and I/O standard against the board documentation; other
   top-level ports are not assigned.
-- The stream and trained-weight ROM formats are not connected to the Python
-  checkpoint/export workflow.
 - Generated files in `impl/` may be stale relative to the current source. The
 Gowin synthesis, place-and-route, and temporary parser directories under
 `impl/` are ignored by Git; keep additional local/generated files under
@@ -364,20 +412,43 @@ build artifact, run Gowin synthesis and place-and-route with the actual
 project settings, read the generated reports, and verify the programmed
 design on the board.
 
+## Accuracy
+
+Recorded numbers (see `data/golden/theta_report.txt` for the machine-written
+report; all figures describe the integer reference, not the FPGA):
+
+- **Floating-point model** (checkpoint, with biases): 92.65% on the MNIST
+  test set, recorded by the training run that produced
+  `data/weights/mnist_snn.pt`.
+- **Checkpoint biases:** L2 norms 1.758 (hidden, 128 neurons) and 0.800
+  (output, 10 neurons). They are dropped in the reference and RTL.
+- **Weight quantization:** one scale per layer, `scale = max|W|/8`, round to
+  nearest, clip to [-8, 7]. Recorded scales: hidden 0.05318, output 0.07602.
+- **THETA selection:** swept integer thresholds 4..32 on the first 2,000
+  training images (a subset, never the test set), no biases. The sweep chose
+  **THETA = 26** (train-subset accuracy 0.8140; the sweep peaks there and
+  falls off toward both ends).
+- **Quantized reference accuracy with THETA = 26:**
+  - no biases (RTL-equivalent): **80.03%** (8003/10000 test images),
+  - with the checkpoint's quantized biases (reference only; the RTL has no
+    bias inputs): 90.36%.
+- **Golden-trace test:** the RTL matches the reference bit-exactly on the
+  exported test set (three MNIST test images plus the synthetic overflow
+  stream): per-event-time traces, final potentials, output counts, and digit.
+
+No paper accuracy (97%), no 4-bit paper accuracy, and no FPGA accuracy are
+claimed here.
+
 ## Current gaps and next steps
 
-To turn the Python training result into an FPGA inference result:
+To turn the verified RTL/reference pair into an FPGA inference result:
 
-1. Define and test one event-memory format shared by the Python encoder,
-   exporter, stream ROM, and RTL scheduler.
-2. Export and load the trained hidden/output weights with explicit signed
-   packing, scale/threshold handling, and verified address order.
-3. Reconcile the trainer's threshold 1.0 and event updates with the current
-   RTL/reference threshold 16 and cycle/time behavior; measure accuracy after
-   quantization.
-4. Connect the input memories, time integrators, event scheduler, hidden
-   layer, output layer, spike counters, and argmax in `snn_top.sv`.
-5. Add an end-to-end test that compares RTL event/spike traces and predictions
-   against a Python golden result, including overflow and simultaneous events.
-6. Complete the Gowin build script and board constraints, then inspect
+1. Give the ROM models a synthesis-friendly initialization path (fixed file
+   names or BSRAM templates) to replace the simulation plusargs.
+2. Complete the Gowin build script and board constraints, then inspect
    synthesis, timing, and resource reports before programming the board.
+3. On-board input path: a real image source (sensor/UART/switches) feeding
+   the event ROMs, since the current design consumes one pre-exported image.
+4. Larger golden set (more images) and, if accuracy must improve, retraining
+   without biases or with quantization-aware training (owner approval
+   required before retraining).

@@ -19,7 +19,10 @@ package pkg_snn;
   localparam int DT_W      = 8;     // delta-time field of a spike event
 
   // ---- Neuron parameters ----
-  localparam int THETA     = 16;    // firing threshold (integer, same units as weights)
+  // THETA = 26 was selected by sweeping integer thresholds 4..32 on the first
+  // 2,000 training images with the quantized no-bias reference (see
+  // data/golden/theta_report.txt and the README "Accuracy" section).
+  localparam int THETA     = 26;    // firing threshold (integer, same units as weights)
 
   // ---- Legacy single-neuron bundles (kept for lif_neuron + tb_lif_neuron) ----
   // A single accepted event handed to a LIF core (the scheduler's output).

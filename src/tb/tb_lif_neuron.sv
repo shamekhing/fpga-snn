@@ -91,10 +91,11 @@ module tb_lif_neuron;
     @(negedge clk);
     rst_n = 1;
 
-    apply_event(0, 20, 4, 1, 0, 4, 1, 0, "positive threshold");
-    apply_event(1, 13, 15, 0, 0, 15, 0, 0, "decay before event");
+    apply_event(0, THETA + 4, 4, 1, 0, 4, 1, 0, "positive threshold");
+    apply_event(1, (THETA - 1) - 2, THETA - 1, 0, 0, THETA - 1, 0, 0,
+                "decay before event");
     apply_event(0, 1, 0, 1, 0, 0, 1, 0, "threshold after decay");
-    apply_event(0, -16, -16, 0, 0, 0, 1, 1, "negative threshold option");
+    apply_event(0, -THETA, -THETA, 0, 0, 0, 1, 1, "negative threshold option");
 
     @(negedge clk);
     clear = 1;
@@ -107,12 +108,14 @@ module tb_lif_neuron;
     clear = 0;
     ev_in.valid = 0;
 
-    apply_event(0, 12, 12, 0, 0, 12, 0, 0, "subthreshold input");
+    apply_event(0, THETA - 4, THETA - 4, 0, 0, THETA - 4, 0, 0,
+                "subthreshold input");
     @(negedge clk);
     ev_in.dt = DT_W'(OVERFLOW_CODE);
     ev_in.valid = 0;
     @(posedge clk);
-    #1 check_state(12, 0, 0, 12, 0, 0, "overflow does not update potential");
+    #1 check_state(THETA - 4, 0, 0, THETA - 4, 0, 0,
+                   "overflow does not update potential");
     apply_event(DT_W'(OVERFLOW_CODE), 0, 0, 0, 0, 0, 0, 0,
                 "elapsed overflow time decays on next event");
 
