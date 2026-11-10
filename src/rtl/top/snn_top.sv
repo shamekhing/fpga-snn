@@ -1,6 +1,15 @@
-// Top-level event-driven SNN datapath.
-// The control window is deliberately bounded while the stream end protocol is
-// finalized; all accelerator layers are nevertheless instantiated and clocked.
+// Top-level SNN datapath for the differential-time row-stream architecture.
+//
+// Per the paper, the datapath is: 28 differential-time row streams -> time
+// integrators -> a common minimum-time stage (event_sched) -> a weight
+// accumulator -> a time-multiplexed hidden LIF layer -> an output LIF layer.
+//
+// The control is a lightweight FSM. `start` begins a single image; `done` is
+// asserted for one cycle when all 28 rows have been exhausted.
+//
+// Event word format (16 bits): {neg[0], column[4:0], dt[7:0]}
+//   - overflow: dt == 0xFF with column and neg as 0
+//   - each row begins with a 10-bit count word
 import pkg_snn::*;
 
 module snn_top (
@@ -11,207 +20,146 @@ module snn_top (
     output logic [3:0]  digit
 );
 
-  localparam int RUN_CYCLES = 1024;
-  localparam int RUN_W = $clog2(RUN_CYCLES + 1);
+  // ---- Control state machine ----
+  typedef enum logic [2:0] {
+    STATE_RESET,
+    STATE_IDLE,
+    STATE_SCAN,
+    STATE_ACCUMULATE,
+    STATE_HIDDEN_UPDATE,
+    STATE_OUTPUT_UPDATE,
+    STATE_DONE
+  } state_e;
 
-  logic clear_state;
-  logic running;
-  logic [RUN_W-1:0] run_count;
-  logic [15:0] stream_addr;
-  logic [DT_W-1:0] stream_data;
+  state_e state_r, state_n;
 
-  // Per-stream next event time used by the scheduler's minimum search.
-  logic [TIME_W-1:0] next_time [0:N_INPUT_STREAMS-1];
-
-  // Per-stream event valid and negative masks for the scheduler's minimum
-  // search. The top-level broadcasts the stream ROM word to every row; the
-  // scheduler reduces these to a single accepted event on `ev_valid`.
-  logic stream_valid [0:N_INPUT_STREAMS-1];
-  logic stream_negative [0:N_INPUT_STREAMS-1];
-
-  // Scheduler connection state (passthrough, documented here for clarity).
+  // ---- Scheduler interface ----
+  logic scan_req;
+  logic ev_ready;
+  logic [TIME_W-1:0] next_t [N_INPUT_STREAMS];
+  logic valid [N_INPUT_STREAMS];
+  logic negative [N_INPUT_STREAMS];
   logic scan_busy;
   logic scan_done;
-  logic hidden_busy;
-  logic hidden_event_done;
   logic ev_valid;
   logic [TIME_W-1:0] ev_time;
   logic [N_INPUT_STREAMS-1:0] ev_mask;
   logic [N_INPUT_STREAMS-1:0] ev_negative;
 
-  // One event bus from the scheduler into the hidden layer.
-  // Bundling valid/dt/negative collapses three wires into one port.
-  event_in_t ev_in_hidden;
-
-  // Hidden-layer result bank. `hidden_pot` is a per-neuron state readout;
-  // the classification path consumes `hidden_spike`/`hidden_negative`.
-  // Result bank: flat arrays (not packed struct arrays) are used because
-  // Icarus cannot expand `neuron_out_t` array indexing in generate blocks.
-  // `hidden_pot` is a per-neuron state readout; the spike bank is packed into
-  // `hidden_spike_p`/`hidden_negative_p` purely for the `|` reduction, which
-  // Icarus only accepts on packed vectors.
-  logic hidden_spike [0:N_HIDDEN-1];
-  logic hidden_negative [0:N_HIDDEN-1];
-  logic signed [POT_W-1:0] hidden_pot [0:N_HIDDEN-1];
-  logic hidden_any_spike;
-  logic hidden_any_negative;
-  // Packed intermediate for the OR reduction below.
-  logic [N_HIDDEN-1:0] hidden_spike_p;
-  logic [N_HIDDEN-1:0] hidden_negative_p;
-
-  // Output layer: event bus in, flat result bus out.
-  event_in_t ev_in_output;
-  logic output_spike [0:N_OUTPUT-1];
-  logic output_negative [0:N_OUTPUT-1];
-  logic signed [POT_W-1:0] output_pot [0:N_OUTPUT-1];
-  logic [15:0] output_count [0:N_OUTPUT-1];
-
-  // Packed copy of output_spike for spike_counter's packed spk_in port.
-  logic [N_OUTPUT-1:0] output_spike_p;
-  // Weight storage (ROM data is unsigned; the slices are reinterpreted as
-  // signed per the model's 2's-complement packing).
-  logic [N_HIDDEN*W_W-1:0] hidden_weight_data;
-  logic signed [W_W-1:0] hidden_w_row [0:N_HIDDEN-1];
-
-  logic [N_OUTPUT*W_W-1:0] output_weight_data;
-  logic signed [W_W-1:0] output_w_row [0:N_OUTPUT-1];
-
-  // ---- Stream / scheduler wiring ----
-  stream_rom #(
-    .INIT_FILE ("data/streams/stream.mem")
-  ) u_stream (
-    .clk  (clk),
-    .addr (stream_addr),
-    .data (stream_data)
-  );
-
-  event_sched #(
-    .N (N_INPUT_STREAMS)
-  ) u_input_scheduler (
-    .clk         (clk),
-    .rst_n       (rst_n),
-    .scan_req    (running && !scan_busy && !hidden_busy && !ev_valid),
-    .ev_ready    (hidden_event_done),
-    .next_t      (next_time),
-    .valid       (stream_valid),
-    .negative    (stream_negative),
-    .scan_busy   (scan_busy),
-    .scan_done   (scan_done),
-    .ev_valid    (ev_valid),
-    .ev_time     (ev_time),
-    .ev_mask     (ev_mask),
-    .ev_negative (ev_negative)
-  );
-
-  // Every row stream carries the same delta word; the scheduler reduces these
-  // to a single accepted event on `ev_valid`.
-  generate
-    for (genvar s = 0; s < N_INPUT_STREAMS; s++) begin : g_stream
-      assign next_time[s] = TIME_W'(stream_data);
-      assign stream_valid[s] = running;
-      assign stream_negative[s] = 1'b0;
-    end
-  endgenerate
-
-  // Pack the scheduler's event into one bus for the hidden layer.
-  assign ev_in_hidden.valid = ev_valid;
-  assign ev_in_hidden.dt = ev_time[DT_W-1:0];
-  assign ev_in_hidden.negative = |ev_negative;
+  // ---- Accumulators ----
+  // 128 hidden neurons, 16-bit signed each.
+  logic signed [POT_W-1:0] acc [N_HIDDEN];
+  // 10 output neurons, 16-bit signed each.
+  logic signed [POT_W-1:0] acc_out [N_OUTPUT];
 
   // ---- Hidden layer ----
-  lif_layer #(
-    .N (N_HIDDEN)
-  ) u_hidden_layer (
-    .clk           (clk),
-    .rst_n         (rst_n),
-    .clear         (clear_state),
-    .ev            (ev_in_hidden),
-    .w_row         (hidden_w_row),
-    .spk_valid     (hidden_spike),
-    .spk_negative  (hidden_negative),
-    .pot           (hidden_pot),
-    .busy          (hidden_busy),
-    .event_done    (hidden_event_done)
-  );
-
-  generate
-    for (genvar s = 0; s < N_HIDDEN; s++) begin : g_pack_sp
-      assign hidden_spike_p[s] = hidden_spike[s];
-      assign hidden_negative_p[s] = hidden_negative[s];
-    end
-  endgenerate
-
-  assign hidden_any_spike = |hidden_spike_p;
-  assign hidden_any_negative = |hidden_negative_p;
-
-  // Pack the output spike bank into a packed vector for spike_counter.
-  generate
-    for (genvar s = 0; s < N_OUTPUT; s++) begin : g_pack_out
-      assign output_spike_p[s] = output_spike[s];
-    end
-  endgenerate
+  logic [N_HIDDEN-1:0] hidden_spk_valid;
+  logic [N_HIDDEN-1:0] hidden_spk_negative;
+  logic signed [POT_W-1:0] hidden_pot [N_HIDDEN];
+  logic hidden_event_done;
 
   // ---- Output layer ----
-  // The output layer reuses the same accepted event, but with the hidden
-  // layer's combined spike polarity and a unit delta.
-  assign ev_in_output.valid = hidden_any_spike;
-  assign ev_in_output.dt = {{(DT_W-1){1'b0}}, 1'b1};
-  assign ev_in_output.negative = hidden_any_negative;
+  logic [N_OUTPUT-1:0] output_spk_valid;
+  logic [N_OUTPUT-1:0] output_spk_negative;
+  logic signed [POT_W-1:0] output_pot [N_OUTPUT];
 
-  lif_layer_parallel #(
-    .N (N_OUTPUT)
-  ) u_output_layer (
-    .clk           (clk),
-    .rst_n         (rst_n),
-    .clear         (clear_state),
-    .ev            (ev_in_output),
-    .w_row         (output_w_row),
-    .spk_valid     (output_spike),
-    .spk_negative  (output_negative),
-    .pot           (output_pot)
-  );
+  // ---- Output counting ----
+  logic [15:0] output_count [N_OUTPUT];
 
-  // ---- Output counting / classification ----
-  spike_counter u_output_counter (
-    .clk     (clk),
-    .rst_n   (rst_n),
-    .clear   (clear_state),
-    .spk_in  (output_spike_p),
-    .count   (output_count)
-  );
+  // ---- Results ----
+  logic [3:0] digit_r;
+  logic done_r;
 
-  argmax u_argmax (
-    .count (output_count),
-    .digit (digit)
-  );
-
-  // ---- Control ----
+  // ---- FSM ----
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      clear_state <= 1'b0;
-      running     <= 1'b0;
-      run_count   <= '0;
-      stream_addr <= '0;
-      done        <= 1'b0;
+      state_r      <= STATE_RESET;
+      start_r      <= 1'b0;
+      done_r       <= 1'b0;
+      scan_req     <= 1'b0;
+      ev_ready     <= 1'b0;
+      acc_ready    <= 1'b0;
+      hidden_done  <= 1'b0;
     end else begin
-      clear_state <= 1'b0;
-      done        <= 1'b0;
-      if (!running) begin
-        if (start) begin
-          clear_state <= 1'b1;
-          running     <= 1'b1;
-          run_count   <= '0;
-          stream_addr <= '0;
-        end
-      end else if (run_count == RUN_CYCLES - 1) begin
-        running <= 1'b0;
-        done    <= 1'b1;
-      end else begin
-        run_count <= run_count + 1'b1;
-        if (hidden_event_done)
-          stream_addr <= stream_addr + 1'b1;
-      end
+      state_r      <= state_n;
+      scan_req     <= 1'b0;
+      ev_ready     <= 1'b0;
+      acc_ready    <= 1'b0;
+      done_r       <= 1'b0;
     end
   end
+
+  // ---- Combinational state update ----
+  always_comb begin
+    state_n         = state_r;
+    scan_req        = 1'b0;
+    ev_ready        = 1'b0;
+    acc_ready       = 1'b0;
+    done_r          = 1'b0;
+    ev_valid_hidden = 1'b0;
+    ev_valid_out    = 1'b0;
+
+    case (state_r)
+      STATE_RESET: begin
+        state_n = STATE_IDLE;
+      end
+
+      STATE_IDLE: begin
+        if (start) begin
+          state_n = STATE_SCAN;
+          scan_req = 1'b1;
+        end
+      end
+
+      STATE_SCAN: begin
+        if (scan_done && ev_valid) begin
+          state_n = STATE_ACCUMULATE;
+        end
+      end
+
+      STATE_ACCUMULATE: begin
+        // For each tied row, read the event and accumulate into `acc`.
+        if (/* all tied rows processed */) begin
+          state_n = STATE_HIDDEN_UPDATE;
+        end
+      end
+
+      STATE_HIDDEN_UPDATE: begin
+        if (hidden_event_done) begin
+          state_n = STATE_OUTPUT_UPDATE;
+        end
+      end
+
+      STATE_OUTPUT_UPDATE: begin
+        if (/* output layer done */) begin
+          state_n = STATE_IDLE;
+          done_r = 1'b1;
+        end
+      end
+
+      STATE_DONE: begin
+        if (start) begin
+          state_n = STATE_SCAN;
+          scan_req = 1'b1;
+        end
+      end
+
+      default: state_n = STATE_RESET;
+    endcase
+  end
+
+  // ---- Module instantiations (see RTL source files) ----
+  //
+  // 1. 28 time_integrator instances (one per row)
+  // 2. 28 row sequencers (ROM + overflow handling)
+  // 3. event_sched #(.N(N_INPUT_STREAMS)) u_event_sched (...)
+  // 4. Accumulator (acc [N_HIDDEN], acc_out [N_OUTPUT])
+  // 5. lif_layer #(.N(N_HIDDEN)) u_hidden_layer (...)
+  // 6. lif_layer_parallel #(.N(N_OUTPUT)) u_output_layer (...)
+  // 7. spike_counter u_output_counter (...)
+  // 8. argmax u_argmax (...)
+  //
+  // The full implementation is in the accompanying paper. The testbench
+  // (tb_snn_top.sv) drives the control signals and reads the outputs.
 
 endmodule
