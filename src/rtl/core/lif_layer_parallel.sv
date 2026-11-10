@@ -1,6 +1,9 @@
-// Parallel LIF layer used for the small output layer.
-// One decay/add/threshold datapath per neuron, all driven from the same
-// precomputed accumulator vector `acc_out` and elapsed time `elapsed_out`.
+// lif_layer_parallel.sv
+// Parallel output LIF layer: one decay/add/threshold datapath per output
+// neuron, all updated in the same cycle. `acc_out` is the precomputed output
+// accumulator (contributions of every hidden neuron that spiked at this event
+// time, accumulated by the top-level sequencer); `elapsed_out` is the time
+// since the last output update. Output neurons use only positive spikes.
 import pkg_snn::*;
 
 module lif_layer_parallel #(
@@ -11,87 +14,74 @@ module lif_layer_parallel #(
     input  logic                     clk,
     input  logic                     rst_n,
     input  logic                     clear,
-    input  logic                     ev_valid,   // pulse to start
-    input  logic signed [POT_W-1:0]  acc_out[N], // precomputed accumulator
-    input  logic [TIME_W-1:0]        elapsed_out, // time since last update
-    output logic                     spk_valid [N],
-    output logic                     spk_negative [N],
-    output logic signed [POT_W-1:0]  pot [N]
+    input  logic                     ev_valid,       // one-cycle start pulse
+    input  logic signed [POT_W-1:0]  acc_out [N],    // precomputed accumulator
+    input  logic [TIME_W-1:0]        elapsed_out,    // time since last update
+    output logic [N-1:0]             spk_valid,      // one-cycle spike pulse
+    output logic [N-1:0]             spk_negative,
+    output logic signed [POT_W-1:0]  pot [N],
+    output logic                     event_done      // one-cycle pulse
 );
 
-  localparam int INDEX_W = (N > 1) ? $clog2(N) : 1;
   localparam logic signed [POT_W-1:0] THETA_VALUE = POT_W'(THETA);
+  localparam logic signed [POT_W-1:0] THETA_LOW_VALUE = POT_W'(THETA_LOW);
 
   logic signed [POT_W-1:0] pot_r [N];
-  logic [INDEX_W-1:0]      neuron_index;
-  logic busy_r;
-  logic ev_valid_r;
-  logic event_done_r;
+  logic [N-1:0]            spk_valid_r;
+  logic [N-1:0]            spk_negative_r;
+  logic                    event_done_r;
 
-  assign event_done_r = 1'b0;
+  // Shifts of POT_W or more saturate to the sign bit: clamp the shift amount.
+  logic [4:0] shift_amt;
+  assign shift_amt = (|elapsed_out[TIME_W-1:5]) ? 5'd31 : elapsed_out[4:0];
+
+  assign event_done = event_done_r;
 
   generate
-    for (genvar i = 0; i < N; i++) begin : g_spk
-      assign spk_valid[i] = spk_valid_r[i];
-      assign spk_negative[i] = spk_negative_r[i];
-      assign pot[i] = pot_r[i];
+    for (genvar k = 0; k < N; k++) begin : g_neuron
+      logic signed [POT_W-1:0] decayed;
+      logic signed [POT_W-1:0] summed;
+      logic                    fire_positive;
+      logic                    fire_negative;
+
+      always_comb begin
+        decayed       = pot_r[k] >>> shift_amt;
+        summed        = decayed + acc_out[k];
+        fire_positive = ev_valid && (summed >= THETA_VALUE);
+        fire_negative = ev_valid && ENABLE_NEGATIVE_SPIKES
+                        && (summed <= THETA_LOW_VALUE);
+      end
+
+      always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+          pot_r[k]          <= '0;
+          spk_valid_r[k]    <= 1'b0;
+          spk_negative_r[k] <= 1'b0;
+        end else if (clear) begin
+          pot_r[k]          <= '0;
+          spk_valid_r[k]    <= 1'b0;
+          spk_negative_r[k] <= 1'b0;
+        end else begin
+          spk_valid_r[k]    <= fire_positive;
+          spk_negative_r[k] <= fire_negative;
+          if (fire_positive)
+            pot_r[k] <= summed - THETA_VALUE;
+          else if (fire_negative)
+            pot_r[k] <= summed - THETA_LOW_VALUE;
+          else if (ev_valid)
+            pot_r[k] <= summed;
+        end
+      end
     end
   endgenerate
 
   always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-      neuron_index <= '0;
-      busy_r       <= 1'b0;
-      ev_valid_r   <= 1'b0;
-      for (int i = 0; i < N; i++) begin
-        pot_r[i]       <= '0;
-        spk_valid_r[i]   <= 1'b0;
-        spk_negative_r[i] <= 1'b0;
-      end
-    end else if (clear) begin
-      neuron_index <= '0;
-      busy_r       <= 1'b0;
-      ev_valid_r   <= 1'b0;
-      for (int i = 0; i < N; i++) begin
-        pot_r[i]       <= '0;
-        spk_valid_r[i]   <= 1'b0;
-        spk_negative_r[i] <= 1'b0;
-      end
-    end else begin
-      spk_valid_r  <= '0;
-      spk_negative_r <= '0;
-
-      if (!busy_r && ev_valid) begin
-        ev_valid_r  <= 1'b0;
-        neuron_index <= '0;
-        busy_r       <= 1'b1;
-      end else if (busy_r) begin
-        logic signed [POT_W-1:0] decayed;
-        logic signed [POT_W-1:0] summed;
-        logic                    fire_positive;
-
-        decayed = pot_r[neuron_index] >>> elapsed_out;
-        summed  = decayed + acc_out[neuron_index];
-        fire_positive = (summed >= THETA_VALUE);
-
-        spk_valid_r[neuron_index] <= fire_positive;
-        spk_negative_r[neuron_index] <= ENABLE_NEGATIVE_SPIKES && (summed <= THETA_LOW);
-
-        if (fire_positive)
-          pot_r[neuron_index] <= summed - THETA_VALUE;
-        else
-          pot_r[neuron_index] <= summed;
-
-        if (neuron_index == INDEX_W'(N - 1)) begin
-          neuron_index <= '0;
-          busy_r       <= 1'b0;
-        end else begin
-          neuron_index <= neuron_index + 1'b1;
-        end
-      end
-    end
+    if (!rst_n)       event_done_r <= 1'b0;
+    else if (clear)   event_done_r <= 1'b0;
+    else              event_done_r <= ev_valid;
   end
 
+  assign spk_valid    = spk_valid_r;
+  assign spk_negative = spk_negative_r;
+
 endmodule
-
-
